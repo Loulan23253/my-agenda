@@ -125,7 +125,6 @@ export class SyncEngine {
             tokens[route.id] = newToken || undefined;
             const entries = parseSyncChanges(res.text);
             const changed = entries.filter((e) => !e.deleted).map((e) => new URL(e.href, route.url).toString());
-            for (const full of changed) if (entries.find((e) => !e.deleted && new URL(e.href, route.url).toString() === full)) deletedHrefs.delete(full);
             for (const entry of entries) if (entry.deleted) deletedHrefs.add(new URL(entry.href, route.url).toString());
 
             // calendar-multiget 合并取回(≤100/批);任一批失败 → 回退逐条 GET
@@ -235,6 +234,9 @@ export class SyncEngine {
       return deps.routes[0];
     };
     const routeById = (id: string): CalendarRoute | undefined => deps.routes.find((r) => r.id === id);
+    // URL 归一化比较:防尾斜杠差异导致的误配(如 .../cal 误配 .../calendar2)
+    const ownerOf = (href: string): CalendarRoute | undefined =>
+      deps.routes.find((r) => href.startsWith(r.url) || href.startsWith(r.url.replace(/\/$/, "") + "/"));
 
     interface PushJob {
       ev: CalendarEvent;
@@ -293,6 +295,18 @@ export class SyncEngine {
       const remoteDirty = remoteDeleted || remoteChanged;
       const localDirty = (await contentFingerprint(ev)) !== entry.pushedFingerprint;
 
+      // 归属校验:远端资源不属于账本登记的日历(同 UID 被复制到多个日历)→
+      // 本轮完全跳过该事件,不做任何方向的同步,避免拉取覆盖与跨日历误推
+      if (remoteItem && entryRoute && !remoteItem.href.startsWith(entryRoute.url.replace(/\/$/, "") + "/") && !remoteItem.href.startsWith(entryRoute.url)) {
+        deps.notify(`日程「${ev.title}」在多个日历中重复,已跳过同步`);
+        continue;
+      }
+      if (!entryRoute) {
+        // 停用/未知日历:数据原地保留,不推送不拉取
+        continue;
+      }
+      const route = entryRoute;
+
       if (localDirty && remoteDirty) {
         summary.conflicts++;
         const pick = await deps.askConflict({
@@ -300,8 +314,6 @@ export class SyncEngine {
           mine: describe(ev),
           theirs: remoteDeleted ? t("sync.serverDeleted") : describe(remoteItem?.event ?? ev),
         });
-        const route = routeById(entry.calendarId);
-        if (!route) continue; // 该日历已停用:事件暂停同步(本地与远端数据都保留)
         if (pick === "mine") {
           if (remoteDeleted) {
             toPush.push({ ev, route, isNew: true }); // 服务器没了 → 重新创建
@@ -325,7 +337,9 @@ export class SyncEngine {
       if (localDirty) {
         const route = routeById(entry.calendarId);
         if (!route) continue; // 该日历已停用:事件暂停同步(本地与远端数据都保留)
-        toPush.push({ ev, route, ifMatch: remoteItem?.etag, isNew: remoteDeleted || !remoteItem });
+        // isNew 仅在全量确认远端缺席时成立;增量轮"未返回"≠"不存在"——
+        // 按 isNew=true 推到 uid 落点 URL 会在服务器留下同 UID 双资源
+        toPush.push({ ev, route, ifMatch: remoteItem?.etag, isNew: remoteDeleted });
       } else if (remoteDirty) {
         if (remoteItem) {
           toApply.push(remoteItem.event);
@@ -348,7 +362,7 @@ export class SyncEngine {
       if (localIds.has(id) || deps.journal.events[id]) continue;
       toApply.push(item.event);
       journalPut(deps.journal, id, {
-        calendarId: deps.routes.find((r) => item.href.startsWith(r.url))?.id ?? "",
+        calendarId: ownerOf(item.href)?.id ?? "",
         href: item.href,
         etag: item.etag,
         pushedFingerprint: await contentFingerprint(item.event),
@@ -367,9 +381,20 @@ export class SyncEngine {
       // 注意:增量扫描(sync-token)不返回"自上次令牌后未变"的资源,此时不能凭空丢条目,
       // 否则远端残留、下轮全量拉取会把事件"复活"——用账本里已知的 href 兜底删除。
       const remoteItem = remoteByUid.get(id);
-      if (remoteItem) toDeleteRemote.push({ id, href: remoteItem.href, etag: remoteItem.etag });
-      else if (entry.state === "pendingDelete" && entry.href) toDeleteRemote.push({ id, href: entry.href, etag: entry.etag ?? "" });
-      else journalRemove(deps.journal, id);
+      if (remoteItem) {
+        toDeleteRemote.push({ id, href: remoteItem.href, etag: remoteItem.etag });
+      } else if (entry.state === "pendingDelete" && entry.href) {
+        toDeleteRemote.push({ id, href: entry.href, etag: entry.etag ?? "" });
+      } else if (remote.complete.has(entry.calendarId)) {
+        // 全量轮确认远端也没有 → 真删除,清账本
+        journalRemove(deps.journal, id);
+      } else if (entry.href) {
+        // 增量轮:远端"未返回"≠"不存在"(未变化的资源不进响应)。
+        // 必须用账本 href 兜底 DELETE;直接清账本会让全量轮把事件当新增拉回复活
+        toDeleteRemote.push({ id, href: entry.href, etag: entry.etag ?? "" });
+      } else {
+        journalRemove(deps.journal, id);
+      }
     }
 
     // 服务器已删除的事件:本地块真正移除(否则下轮无账本会被当新增复活)
@@ -471,7 +496,7 @@ export class SyncEngine {
               const merged = loaded.events.map((e) => (e.id === remoteEv.id ? remoteEv : e));
               if (!merged.some((e) => e.id === remoteEv.id)) merged.push(remoteEv);
               const month = monthKey(remoteEv.startsAt);
-              await deps.notes.writeMonth(month, merged.filter((e) => monthKey(e.startsAt) === month), await deps.notes.readMonthPreamble(month));
+              await deps.notes.writeMonth(month, merged, await deps.notes.readMonthPreamble(month));
               journalPut(deps.journal, job.ev.id, {
                 calendarId: job.route.id,
                 href: url,
@@ -512,8 +537,10 @@ export class SyncEngine {
     for (const del of toDeleteRemote) {
       await pace();
       try {
-        // 用该日程所属日历的凭据(多日历账号可能不同)
-        const route = deps.routes.find((r) => del.href.startsWith(r.url)) ?? deps.routes[0];
+        // 用该日程所属日历的凭据(多日历账号可能不同);
+        // 匹配不到启用日历(已停用/已移除)时不删除,保留账本条目,恢复同步后继续
+        const route = ownerOf(del.href);
+        if (!route) continue;
         const auth = route.auth;
         let res = await deps.http({
           url: del.href,
@@ -547,6 +574,7 @@ export class SyncEngine {
     for (const [id, token] of Object.entries(remote.tokens)) {
       const url = deps.routes.find((r) => r.id === id)?.url ?? "";
       if (token) deps.journal.calendars[id] = { url, syncToken: token };
+      else if (deps.journal.calendars[id]) deps.journal.calendars[id] = { url, syncToken: "" };
     }
 
     await deps.saveJournal();

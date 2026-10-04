@@ -152,12 +152,17 @@ function hhmm(iso: string): string {
   return m ? m[1] : "";
 }
 
+// 远端数据(标题/字段值)一律压成单行:防止 ICS 换行注入破坏笔记结构或伪造字段
+function oneLine(s: string): string {
+  return s.replace(/\r?\n/g, " ");
+}
+
 export function eventHeading(ev: CalendarEvent): string {
-  if (ev.isAllDay) return ev.title;
+  if (ev.isAllDay) return oneLine(ev.title);
   const s = hhmm(ev.startsAt);
   const e = ev.endsAt ? hhmm(ev.endsAt) : "";
   const span = s ? (e ? `${s}–${e}` : s) : "";
-  return span ? `${span} ${ev.title}` : ev.title;
+  return span ? `${span} ${oneLine(ev.title)}` : oneLine(ev.title);
 }
 
 export function eventToFields(ev: CalendarEvent): Record<string, string> {
@@ -180,6 +185,8 @@ const META_KEYS = new Set(["etag", "href", "base_hash", "origin", "server_delete
 
 export function serializeBlock(ev: CalendarEvent, existing?: NoteBlock): string {
   const fields = eventToFields(ev);
+  for (const k of Object.keys(fields)) fields[k] = oneLine(fields[k]);
+  if (ev.status) fields["status"] = ev.status; // 必须在 order 计算前写入,否则新块/状态变更不会落盘
   const order = existing?.fieldOrder.filter((k) => k in fields) ?? [];
   for (const k of Object.keys(fields)) if (!order.includes(k)) order.push(k);
   // 未知键透传:v1 的 source/protocol/seq 等扩展字段原样保留
