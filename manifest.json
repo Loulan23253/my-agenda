@@ -1,7 +1,7 @@
 {
   "id": "myagenda",
   "name": "MyAgenda",
-  "version": "0.10.15",
+  "version": "0.10.17",
   "minAppVersion": "1.7.2",
   "description": "Two-way iCloud / CalDAV calendar sync — Apple-style day, week & month views, recurring events, drag & drop, daily-note injection and reminders. Your credentials stay on your device.",
   "author": "yixianrichen",

@@ -67,6 +67,8 @@ interface ScanResult {
   missing: CalendarRoute[];
   /** 本轮做过全量 REPORT 的日历 id:只有这些日历的"缺席"才可信为已删除。 */
   complete: Set<string>;
+  /** 全量回退后令牌确认失效的日历 id(持久化时清除 syncToken)。 */
+  tokenCleared: Set<string>;
 }
 
 
@@ -99,12 +101,17 @@ export class SyncEngine {
     const tokens: Record<string, string | undefined> = {};
     const missing: CalendarRoute[] = [];
     const complete = new Set<string>();
+    const pendingTokens: Record<string, string | undefined> = {};
+    const tokenCleared = new Set<string>();
 
     for (const route of deps.routes) {
       const token = deps.journal.calendars[route.id]?.syncToken;
       let incrementalOk = false;
 
       if (token) {
+        // multigetOk/pendingToken 在 try 外声明:catch 后仍可判断"内容是否取回全"
+        let multigetOk = false;
+        let pendingToken: string | undefined = undefined;
         try {
           const res = await deps.http({
             url: route.url,
@@ -122,14 +129,14 @@ export class SyncEngine {
           if (res.status >= 200 && res.status < 300) {
             incrementalOk = true;
             const newToken = parseSyncToken(res.text);
-            tokens[route.id] = newToken || undefined;
+            pendingToken = newToken || undefined;
             const entries = parseSyncChanges(res.text);
             const changed = entries.filter((e) => !e.deleted).map((e) => new URL(e.href, route.url).toString());
             for (const entry of entries) if (entry.deleted) deletedHrefs.add(new URL(entry.href, route.url).toString());
 
             // calendar-multiget 合并取回(≤100/批);任一批失败 → 回退逐条 GET
             const fetched = new Set<string>();
-            let multigetOk = changed.length > 0;
+            multigetOk = changed.length > 0;
             for (let i = 0; i < changed.length && multigetOk; i += 100) {
               const batch = changed.slice(i, i + 100);
               try {
@@ -170,6 +177,8 @@ export class SyncEngine {
         } catch {
           incrementalOk = false; // 游标同步不可用 → 整个日历回退全量
         }
+        // 内容取回成功才推进令牌;失败保持旧令牌(变更拖延到下轮增量重报,而非永丢)
+        tokens[route.id] = multigetOk ? pendingToken : undefined;
       }
 
       if (!incrementalOk) {
@@ -192,13 +201,14 @@ export class SyncEngine {
           continue;
         }
         tokens[route.id] = undefined;
+        tokenCleared.add(route.id);
         complete.add(route.id);
         for (const item of parseMultistatusCalendarData(res.text, route.url)) {
           byUid.set(item.event.id, item);
         }
       }
     }
-    return { byUid, deletedHrefs, tokens, missing, complete };
+    return { byUid, deletedHrefs, tokens, missing, complete, tokenCleared };
   }
 
   // ── 主流程 ──
@@ -267,7 +277,7 @@ export class SyncEngine {
           // 收养:服务器已有此 uid(v1 时代同步过)。内容一致 → 仅登记;不一致 → 本地版本优先推送
           const remoteFp = await contentFingerprint(remoteItem.event);
           journalPut(deps.journal, ev.id, {
-            calendarId: pickRoute(ev)?.id ?? "",
+            calendarId: ownerOf(remoteItem.href)?.id ?? "",
             href: remoteItem.href,
             etag: remoteItem.etag,
             pushedFingerprint: remoteFp,
@@ -574,7 +584,10 @@ export class SyncEngine {
     for (const [id, token] of Object.entries(remote.tokens)) {
       const url = deps.routes.find((r) => r.id === id)?.url ?? "";
       if (token) deps.journal.calendars[id] = { url, syncToken: token };
-      else if (deps.journal.calendars[id]) deps.journal.calendars[id] = { url, syncToken: "" };
+    }
+    // 全量回退确认令牌失效的日历:清除 syncToken(下轮重试增量,而非永久全量)
+    for (const id of remote.tokenCleared) {
+      if (deps.journal.calendars[id]) deps.journal.calendars[id] = { url: deps.journal.calendars[id]?.url ?? "", syncToken: "" };
     }
 
     await deps.saveJournal();
