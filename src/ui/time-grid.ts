@@ -122,7 +122,9 @@ export function renderAllDaySection(
     let endExcl = colIndex.get(dateKey(parseLocal(o.end ?? o.start)));
     if (endExcl === undefined) endExcl = o.start >= lastKey ? days.length : startCol + 1;
     const prev = spanMap.get(o.event.id);
-    if (prev) {
+    if (prev && startCol <= prev.colEndExcl) {
+      // 仅首尾相接的片段并入同一色条(多日全天事件的逐日片段);
+      // 不连续的重复实例(如一三五)各自成条,避免被画成贯通全周
       prev.colStart = Math.min(prev.colStart, startCol);
       prev.colEndExcl = Math.max(prev.colEndExcl, endExcl);
     } else {
@@ -488,6 +490,9 @@ export function renderTimeGrid(
           return `${dateKey(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
         };
         suppressClick = true; // 抑制随后的原生 click
+        window.setTimeout(() => {
+          suppressClick = false; // 兜底:click 未派发(如被弹窗拦截)时防残留吞掉后续点击
+        }, 0);
         deps.onMove(occ, toIso(newStart), toIso(newEnd));
         // 保险:onMove 的实现若未触发重渲染,原块不能停留在隐藏态
         block.removeClass("is-drag-source");

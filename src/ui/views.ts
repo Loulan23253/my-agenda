@@ -199,7 +199,8 @@ export function renderMonthView(container: HTMLElement, events: CalendarEvent[],
       pill.addEventListener("dragstart", (e) => {
         const dt = e.dataTransfer;
         if (dt) {
-          dt.setData(DND_TYPE, o.event.id);
+          // 重复事件同 id 多实例:键带上实例起始时刻,drop 侧精确反查
+          dt.setData(DND_TYPE, `${o.event.id}|${o.start}`);
           dt.effectAllowed = "move";
         }
         pill.classList.add("is-dragging");
@@ -231,8 +232,11 @@ export function renderMonthView(container: HTMLElement, events: CalendarEvent[],
       cell.addEventListener("dragleave", () => cell.classList.remove("ag2-month-drop"));
       cell.addEventListener("drop", (e) => {
         cell.classList.remove("ag2-month-drop");
-        const id = e.dataTransfer?.getData(DND_TYPE);
-        const occ = id ? [...byDay.values()].flat().find((x) => x.event.id === id) : undefined;
+        const dragKey = e.dataTransfer?.getData(DND_TYPE);
+        const occ = dragKey
+          ? [...byDay.values()].flat().find((x) => `${x.event.id}|${x.start}` === dragKey) ??
+            [...byDay.values()].flat().find((x) => x.event.id === dragKey)
+          : undefined;
         if (occ) {
           e.preventDefault();
           deps.onMoveToDay(occ, day);

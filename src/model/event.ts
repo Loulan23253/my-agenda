@@ -29,6 +29,10 @@ export interface CalendarEvent {
   /** 确认状态:confirmed/tentative/cancelled(与服务器的 STATUS 属性互通)。 */
   status?: string;
   repeats?: Recurrence;
+  /** 同 UID 的 RECURRENCE-ID 例外，随主系列一起存储与同步。 */
+  recurrenceOverrides?: CalendarEvent[];
+  /** 此例外原本所属的实例时刻。 */
+  recurrenceId?: string;
   /** 被排除的实例日期(与 startsAt 同格式)。 */
   skippedDates?: string[];
   /** 提前提醒的分钟数;0 = 事件开始时。 */

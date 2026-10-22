@@ -49,6 +49,8 @@ export interface SyncSummary {
   deleted: number;
   conflicts: number;
   adopted: number;
+  failed: number;
+  unmapped: number;
   months: string[];
 }
 
@@ -94,118 +96,97 @@ export class SyncEngine {
 
   // ── SCAN:逐日历拉取远端状态(游标增量优先,回退全量)──
 
-  private async scan(): Promise<ScanResult> {
+  private async scan(forceFull = new Set<string>()): Promise<ScanResult> {
     const { deps } = this;
     const byUid = new Map<EventId, RemoteItem>();
     const deletedHrefs = new Set<string>();
     const tokens: Record<string, string | undefined> = {};
     const missing: CalendarRoute[] = [];
     const complete = new Set<string>();
-    const pendingTokens: Record<string, string | undefined> = {};
     const tokenCleared = new Set<string>();
 
     for (const route of deps.routes) {
-      const token = deps.journal.calendars[route.id]?.syncToken;
+      const token = forceFull.has(route.id) ? undefined : deps.journal.calendars[route.id]?.syncToken;
       let incrementalOk = false;
-
       if (token) {
-        // multigetOk/pendingToken 在 try 外声明:catch 后仍可判断"内容是否取回全"
-        let multigetOk = false;
-        let pendingToken: string | undefined = undefined;
+        // 本日历的增量结果先暂存；不完整时全部丢弃并回退全量，不能留下半套变更。
+        const staged = new Map<EventId, RemoteItem>();
+        const deleted = new Set<string>();
         try {
           const res = await deps.http({
-            url: route.url,
-            method: "REPORT",
+            url: route.url, method: "REPORT",
             headers: authHeaders(route.auth, { Depth: "1", "Content-Type": XML_CT }),
-            body:
-              `<d:sync-collection xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
-              `<d:sync-token>${token}</d:sync-token><d:sync-level>1</d:sync-level>` +
+            body: `<d:sync-collection xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
+              `<d:sync-token>${token.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</d:sync-token><d:sync-level>1</d:sync-level>` +
               `<d:prop><d:getetag/></d:prop></d:sync-collection>`,
           });
           if (res.status === 404) {
-            if (!missing.find((r) => r.id === route.id)) missing.push(route);
+            missing.push(route);
             continue;
           }
-          if (res.status >= 200 && res.status < 300) {
-            incrementalOk = true;
-            const newToken = parseSyncToken(res.text);
-            pendingToken = newToken || undefined;
-            const entries = parseSyncChanges(res.text);
-            const changed = entries.filter((e) => !e.deleted).map((e) => new URL(e.href, route.url).toString());
-            for (const entry of entries) if (entry.deleted) deletedHrefs.add(new URL(entry.href, route.url).toString());
-
-            // calendar-multiget 合并取回(≤100/批);任一批失败 → 回退逐条 GET
-            const fetched = new Set<string>();
-            multigetOk = changed.length > 0;
-            for (let i = 0; i < changed.length && multigetOk; i += 100) {
-              const batch = changed.slice(i, i + 100);
-              try {
-                const mg = await deps.http({
-                  url: route.url,
-                  method: "REPORT",
-                  headers: authHeaders(route.auth, { Depth: "1", "Content-Type": XML_CT }),
-                  body:
-                    `<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
-                    `<d:prop><d:getetag/><c:calendar-data/></d:prop>` +
-                    batch.map((h) => `<d:href>${h.replace(/&/g, "&amp;")}</d:href>`).join("") +
-                    `</c:calendar-multiget>`,
-                });
-                if (mg.status < 200 || mg.status >= 300) { multigetOk = false; break; }
-                const items = parseMultistatusCalendarData(mg.text, route.url);
-                if (items.length === 0 && batch.length > 0) { multigetOk = false; break; }
-                for (const item of items) { byUid.set(item.event.id, item); fetched.add(item.href); }
-              } catch {
-                multigetOk = false;
+          if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
+          const entries = parseSyncChanges(res.text, route.url);
+          const changed = [...new Set(entries.filter((e) => !e.deleted).map((e) => new URL(e.href, route.url).toString()))];
+          for (const entry of entries) if (entry.deleted) deleted.add(new URL(entry.href, route.url).toString());
+          const fetched = new Set<string>();
+          for (let i = 0; i < changed.length; i += 100) {
+            const batch = changed.slice(i, i + 100);
+            try {
+              const mg = await deps.http({
+                url: route.url, method: "REPORT",
+                headers: authHeaders(route.auth, { Depth: "1", "Content-Type": XML_CT }),
+                body: `<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
+                  `<d:prop><d:getetag/><c:calendar-data/></d:prop>` +
+                  batch.map((h) => `<d:href>${h.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</d:href>`).join("") +
+                  `</c:calendar-multiget>`,
+              });
+              if (mg.status < 200 || mg.status >= 300) throw new Error(`HTTP ${mg.status}`);
+              for (const item of parseMultistatusCalendarData(mg.text, route.url)) {
+                if (!batch.includes(item.href)) continue;
+                staged.set(item.event.id, item);
+                fetched.add(item.href);
               }
+            } catch {
+              // multiget 不支持、内容不全或资源解析失败时，对遗漏资源逐条 GET。
             }
-            if (!multigetOk) {
-              for (const full of changed) {
-                if (fetched.has(full)) continue;
-                const icsRes = await deps.http({ url: full, method: "GET", headers: authHeaders(route.auth) });
-                if (icsRes.status >= 200 && icsRes.status < 300) {
-                  for (const ev of parseIcsToEvents(icsRes.text)) {
-                    byUid.set(ev.id, {
-                      event: ev,
-                      href: full,
-                      etag: firstHeader(icsRes.headers, "etag") ?? `"${icsRes.text.length}"`,
-                    });
-                  }
-                }
-              }
+            for (const full of batch) {
+              if (fetched.has(full)) continue;
+              const result = await deps.http({ url: full, method: "GET", headers: authHeaders(route.auth) });
+              if (result.status === 404) { deleted.add(full); fetched.add(full); continue; }
+              if (result.status < 200 || result.status >= 300) throw new Error(`日程拉取失败(HTTP ${result.status})`);
+              const events = parseCalendarResource(result.text);
+              for (const event of events) staged.set(event.id, {
+                event, href: full, etag: firstHeader(result.headers, "etag") ?? `"${result.text.length}"`,
+              });
+              fetched.add(full);
             }
           }
+          if (changed.some((href) => !fetched.has(href))) throw new Error("日程拉取不完整");
+          const nextToken = parseSyncToken(res.text);
+          for (const [id, item] of staged) byUid.set(id, item);
+          for (const href of deleted) deletedHrefs.add(href);
+          tokens[route.id] = nextToken || undefined;
+          incrementalOk = true;
         } catch {
-          incrementalOk = false; // 游标同步不可用 → 整个日历回退全量
+          // 不能信任任何半途返回的增量结果，回退到经完整校验的全量响应。
         }
-        // 内容取回成功才推进令牌;失败保持旧令牌(变更拖延到下轮增量重报,而非永丢)
-        tokens[route.id] = multigetOk ? pendingToken : undefined;
       }
-
       if (!incrementalOk) {
         const res = await deps.http({
-          url: route.url,
-          method: "REPORT",
+          url: route.url, method: "REPORT",
           headers: authHeaders(route.auth, { Depth: "1", "Content-Type": XML_CT }),
-          body:
-            `<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
+          body: `<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
             `<d:prop><d:getetag/><c:calendar-data/></d:prop>` +
-            `<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"/></c:comp-filter></c:filter>` +
-            `</c:calendar-query>`,
+            `<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"/></c:comp-filter></c:filter></c:calendar-query>`,
         });
-        if (res.status === 404) {
-          if (!missing.find((r) => r.id === route.id)) missing.push(route);
-          continue;
-        }
-        if (res.status < 200 || res.status >= 300) {
-          deps.notify(`日历「${route.name || route.id}」拉取失败(HTTP ${res.status})`);
-          continue;
-        }
+        if (res.status === 404) { missing.push(route); continue; }
+        if (res.status < 200 || res.status >= 300) throw new Error(`日历「${route.name || route.id}」拉取失败(HTTP ${res.status})`);
+        // 先校验所有资源，再将缺席视为删除；坏资源绝不作为删除依据。
+        const items = parseMultistatusCalendarData(res.text, route.url);
+        for (const item of items) byUid.set(item.event.id, item);
         tokens[route.id] = undefined;
         tokenCleared.add(route.id);
         complete.add(route.id);
-        for (const item of parseMultistatusCalendarData(res.text, route.url)) {
-          byUid.set(item.event.id, item);
-        }
       }
     }
     return { byUid, deletedHrefs, tokens, missing, complete, tokenCleared };
@@ -215,10 +196,14 @@ export class SyncEngine {
 
   async run(): Promise<SyncSummary> {
     const { deps } = this;
-    const summary: SyncSummary = { pulled: 0, pushed: 0, created: 0, deleted: 0, conflicts: 0, adopted: 0, months: [] };
+    const summary: SyncSummary = { pulled: 0, pushed: 0, created: 0, deleted: 0, conflicts: 0, adopted: 0, failed: 0, unmapped: 0, months: [] };
     const read = await deps.notes.loadAll();
     const local = read.events;
-    const remote = await this.scan();
+    const loadedIds = new Set(local.map(event => event.id));
+    const forceFull = new Set(Object.entries(deps.journal.events)
+      .filter(([id, entry]) => entry.state !== "pendingDelete" && !loadedIds.has(id))
+      .map(([, entry]) => entry.calendarId));
+    const remote = await this.scan(forceFull);
 
     // 日历在 iCloud 上已被删除(404):询问用户是否移除配置与本地日程
     if (remote.missing.length && deps.askCalendarsDeleted) {
@@ -240,6 +225,7 @@ export class SyncEngine {
       if (cat) {
         const hit = deps.routes.find((r) => r.category.trim() === cat);
         if (hit) return hit;
+        return undefined; // 明确分类无对应日历时，保留本地，不能随便写入第一个日历。
       }
       return deps.routes[0];
     };
@@ -253,7 +239,9 @@ export class SyncEngine {
       route: CalendarRoute;
       ifMatch?: string;
       isNew: boolean;
+      href?: string;
     }
+    const deferredCalendars = new Set<string>();
     const toPush: PushJob[] = [];
     const toApply: CalendarEvent[] = [];
     const toDeleteRemote: { id: EventId; href: string; etag: string }[] = [];
@@ -285,12 +273,13 @@ export class SyncEngine {
           });
           summary.adopted++;
           if ((await contentFingerprint(ev)) !== remoteFp) {
-            const route = pickRoute(ev);
-            if (route) toPush.push({ ev, route, ifMatch: remoteItem.etag, isNew: false });
+            const route = ownerOf(remoteItem.href);
+            if (route) toPush.push({ ev, route, href: remoteItem.href, ifMatch: remoteItem.etag, isNew: false });
           }
         } else {
           const route = pickRoute(ev);
           if (route) toPush.push({ ev, route, isNew: true });
+          else summary.unmapped++;
         }
         continue;
       }
@@ -324,11 +313,12 @@ export class SyncEngine {
           mine: describe(ev),
           theirs: remoteDeleted ? t("sync.serverDeleted") : describe(remoteItem?.event ?? ev),
         });
+        if (!pick) { deferredCalendars.add(route.id); continue; }
         if (pick === "mine") {
           if (remoteDeleted) {
             toPush.push({ ev, route, isNew: true }); // 服务器没了 → 重新创建
           } else {
-            toPush.push({ ev, route, ifMatch: remoteItem?.etag, isNew: false });
+            toPush.push({ ev, route, href: remoteItem?.href, ifMatch: remoteItem?.etag ?? entry.etag, isNew: false });
           }
         } else if (remoteDeleted) {
           dropLocally.add(ev.id);
@@ -349,7 +339,7 @@ export class SyncEngine {
         if (!route) continue; // 该日历已停用:事件暂停同步(本地与远端数据都保留)
         // isNew 仅在全量确认远端缺席时成立;增量轮"未返回"≠"不存在"——
         // 按 isNew=true 推到 uid 落点 URL 会在服务器留下同 UID 双资源
-        toPush.push({ ev, route, ifMatch: remoteItem?.etag, isNew: remoteDeleted });
+        toPush.push({ ev, route, href: remoteItem?.href, ifMatch: remoteItem?.etag ?? entry.etag, isNew: remoteDeleted });
       } else if (remoteDirty) {
         if (remoteItem) {
           toApply.push(remoteItem.event);
@@ -387,24 +377,19 @@ export class SyncEngine {
     const touched = new Set<string>([...toApply.map((x) => x.id), ...toPush.map((j) => j.ev.id)]);
     for (const [id, entry] of Object.entries(deps.journal.events)) {
       if (localIds.has(id) || dropLocally.has(id) || touched.has(id)) continue;
-      // 账本里有、本地没有:本地删除待传播(pendingDelete)或异常消失,统一对远端执行删除。
-      // 注意:增量扫描(sync-token)不返回"自上次令牌后未变"的资源,此时不能凭空丢条目,
-      // 否则远端残留、下轮全量拉取会把事件"复活"——用账本里已知的 href 兜底删除。
       const remoteItem = remoteByUid.get(id);
-      if (remoteItem) {
-        toDeleteRemote.push({ id, href: remoteItem.href, etag: remoteItem.etag });
-      } else if (entry.state === "pendingDelete" && entry.href) {
-        toDeleteRemote.push({ id, href: entry.href, etag: entry.etag ?? "" });
-      } else if (remote.complete.has(entry.calendarId)) {
-        // 全量轮确认远端也没有 → 真删除,清账本
-        journalRemove(deps.journal, id);
-      } else if (entry.href) {
-        // 增量轮:远端"未返回"≠"不存在"(未变化的资源不进响应)。
-        // 必须用账本 href 兜底 DELETE;直接清账本会让全量轮把事件当新增拉回复活
-        toDeleteRemote.push({ id, href: entry.href, etag: entry.etag ?? "" });
-      } else {
-        journalRemove(deps.journal, id);
+      // 文件夹移动、iCloud 索引延迟和文件暂时缺失都不是删除指令。
+      // 只有用户在插件内明确删除（pendingDelete）才允许删除云端。
+      if (entry.state === "pendingDelete") {
+        const href = remoteItem?.href ?? entry.href;
+        if (href) toDeleteRemote.push({ id, href, etag: remoteItem?.etag ?? entry.etag ?? "" });
+      } else if (remoteItem) {
+        toApply.push(remoteItem.event);
+        journalPut(deps.journal, id, { ...entry, href: remoteItem.href, etag: remoteItem.etag,
+          pushedFingerprint: await contentFingerprint(remoteItem.event) });
+        summary.pulled++;
       }
+
     }
 
     // 服务器已删除的事件:本地块真正移除(否则下轮无账本会被当新增复活)
@@ -449,8 +434,8 @@ export class SyncEngine {
     const pace = async () => {
       if (writes++ > 0) await deps.sleep(PACE_MS);
     };
-    const putWith503 = async (auth: DavAuth, url: string, body: string, ifMatch?: string) => {
-      const headers = { ...authHeaders(auth, { "Content-Type": "text/calendar; charset=utf-8" }), ...(ifMatch ? { "If-Match": ifMatch } : {}) };
+    const putWith503 = async (auth: DavAuth, url: string, body: string, ifMatch?: string, isNew = false) => {
+      const headers = { ...authHeaders(auth, { "Content-Type": "text/calendar; charset=utf-8" }), ...(isNew ? { "If-None-Match": "*" } : ifMatch ? { "If-Match": ifMatch } : {}) };
       let res = await deps.http({ url, method: "PUT", headers, body });
       for (const delay of RETRY_503) {
         if (res.status !== 503) break;
@@ -464,9 +449,9 @@ export class SyncEngine {
       await pace();
       try {
         const entry = deps.journal.events[job.ev.id];
-        const url = job.isNew || !entry?.href ? resourceUrl(job.route.url, job.ev.id) : entry.href;
+        const url = job.href ?? (job.isNew || !entry?.href ? resourceUrl(job.route.url, job.ev.id) : entry.href);
         const ics = buildSingleIcs(job.ev);
-        const res = await putWith503(job.route.auth, url, ics, job.isNew ? undefined : job.ifMatch);
+        const res = await putWith503(job.route.auth, url, ics, job.isNew ? undefined : job.ifMatch, job.isNew);
         if (res.status >= 200 && res.status < 300) {
           journalPut(deps.journal, job.ev.id, {
             calendarId: job.route.id,
@@ -482,7 +467,8 @@ export class SyncEngine {
           // 一致 → 只是 etag 过期,更新账本即可;不一致 → 真冲突,按策略留给下轮
           const fresh = await deps.http({ url, method: "GET", headers: authHeaders(job.route.auth) });
           if (fresh.status >= 200 && fresh.status < 300) {
-            const remoteEv = parseIcsToEvents(fresh.text)[0];
+            const remoteEv = parseCalendarResource(fresh.text).find((event) => event.id === job.ev.id);
+            if (!remoteEv) throw new Error("服务器资源的日程 UID 与本地不一致，已停止写入");
             const remoteFp = remoteEv ? await contentFingerprint(remoteEv) : "";
             const localFp = await contentFingerprint(job.ev);
             if (remoteFp === localFp) {
@@ -501,6 +487,7 @@ export class SyncEngine {
               mine: describe(job.ev),
               theirs: remoteEv ? describe(remoteEv) : t("sync.serverDeleted"),
             });
+            if (!pick) { deferredCalendars.add(job.route.id); continue; }
             if (pick === "theirs" && remoteEv) {
               const loaded = await deps.notes.loadAll();
               const merged = loaded.events.map((e) => (e.id === remoteEv.id ? remoteEv : e));
@@ -518,7 +505,9 @@ export class SyncEngine {
               continue;
             }
             if (pick === "mine") {
-              const retry = await putWith503(job.route.auth, url, ics);
+              const freshEtag = firstHeader(fresh.headers, "etag");
+              if (!freshEtag) throw new Error("服务器未提供日程版本，已保留本地修改并停止写入");
+              const retry = await putWith503(job.route.auth, url, ics, freshEtag);
               if (retry.status >= 200 && retry.status < 300) {
                 journalPut(deps.journal, job.ev.id, {
                   calendarId: job.route.id,
@@ -531,15 +520,21 @@ export class SyncEngine {
                 continue;
               }
             }
+            summary.failed++;
             deps.notify(`「${job.ev.title}」冲突未解决,保留本地待同步`);
             continue;
           }
           // 服务器没有此资源(内容被拒或从未建成)→ 如实提示,不再谎称"下轮拉取"
-          deps.notify(`「${job.ev.title}」推送被拒(HTTP ${res.status}),内容未上传`);
+          summary.failed++;
+          deps.notify(fresh.status === 404 && res.status === 412
+            ? `「${job.ev.title}」新建被拒(HTTP 412)，目标地址无资源，可能已存在于其他未同步日历；已保留本地，请检查日历归属`
+            : `「${job.ev.title}」推送被拒(HTTP ${res.status}),内容未上传`);
         } else {
+          summary.failed++;
           deps.notify(`「${job.ev.title}」推送失败(HTTP ${res.status})`);
         }
       } catch (e) {
+        summary.failed++;
         deps.notify(`「${job.ev.title}」推送异常:${msg(e)}`);
       }
     }
@@ -574,19 +569,23 @@ export class SyncEngine {
           await deps.notes.removeByUids(new Set([del.id]));
           summary.deleted++;
         } else {
+          summary.failed++;
           deps.notify(`删除失败(HTTP ${res.status})`);
         }
       } catch (e) {
+        summary.failed++;
         deps.notify(`删除异常:${msg(e)}`);
       }
     }
 
     for (const [id, token] of Object.entries(remote.tokens)) {
+      if (deferredCalendars.has(id)) continue;
       const url = deps.routes.find((r) => r.id === id)?.url ?? "";
       if (token) deps.journal.calendars[id] = { url, syncToken: token };
     }
     // 全量回退确认令牌失效的日历:清除 syncToken(下轮重试增量,而非永久全量)
     for (const id of remote.tokenCleared) {
+      if (deferredCalendars.has(id)) continue;
       if (deps.journal.calendars[id]) deps.journal.calendars[id] = { url: deps.journal.calendars[id]?.url ?? "", syncToken: "" };
     }
 
@@ -606,7 +605,7 @@ function localName(el: Element): string {
 }
 
 function parseSyncToken(xml: string): string | null {
-  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const doc = parseMultistatusDocument(xml);
   for (const el of Array.from(doc.getElementsByTagName("*"))) {
     if (localName(el) === "sync-token") return (el.textContent || "").trim() || null;
   }
@@ -618,8 +617,8 @@ interface SyncChange {
   deleted: boolean;
 }
 
-function parseSyncChanges(xml: string): SyncChange[] {
-  const doc = new DOMParser().parseFromString(xml, "application/xml");
+function parseSyncChanges(xml: string, baseUrl: string): SyncChange[] {
+  const doc = parseMultistatusDocument(xml);
   const out: SyncChange[] = [];
   for (const el of Array.from(doc.getElementsByTagName("*"))) {
     if (localName(el) !== "response") continue;
@@ -632,13 +631,15 @@ function parseSyncChanges(xml: string): SyncChange[] {
       else if (tag === "getetag") hasEtag = true;
       else if (tag === "status" && (child.textContent || "").includes("404")) status404 = true;
     }
-    if (href) out.push({ href, deleted: !hasEtag || status404 });
+    if (href && isCalendarCollection(href, baseUrl)) continue;
+    if (!href || (!hasEtag && !status404)) throw new Error("日历增量响应不完整");
+    out.push({ href, deleted: status404 });
   }
   return out;
 }
 
 function parseMultistatusCalendarData(xml: string, baseUrl: string): RemoteItem[] {
-  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const doc = parseMultistatusDocument(xml);
   const out: RemoteItem[] = [];
   for (const el of Array.from(doc.getElementsByTagName("*"))) {
     if (localName(el) !== "response") continue;
@@ -651,11 +652,36 @@ function parseMultistatusCalendarData(xml: string, baseUrl: string): RemoteItem[
       else if (tag === "getetag" && !etag) etag = (child.textContent || "").trim();
       else if (tag === "calendar-data" && !ics) ics = (child.textContent || "").trim();
     }
-    if (!href || !ics) continue;
+    // iCloud 也返回日历集合自身，其 calendar-data 为 404；它并非损坏的事件资源。
+    if (href && isCalendarCollection(href, baseUrl)) continue;
+    if (!href || !ics) throw new Error("日历资源内容不完整，已暂停同步以保留本地日程");
     const full = new URL(href, baseUrl).toString();
-    for (const ev of parseIcsToEvents(ics)) {
+    for (const ev of parseCalendarResource(ics)) {
       out.push({ event: ev, href: full, etag });
     }
   }
   return out;
+}
+
+/** 解析失败不是删除：任一资源不完整时阻止本轮对账和写入。 */
+function parseCalendarResource(text: string): CalendarEvent[] {
+  const diagnostics = { skipped: 0 };
+  const events = parseIcsToEvents(text, "", diagnostics);
+  if (diagnostics.skipped || !events.length) throw new Error("日程解析失败，已暂停同步以保留本地日程");
+  return events;
+}
+
+function parseMultistatusDocument(xml: string): Document {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length || !doc.documentElement || localName(doc.documentElement) !== "multistatus") {
+    throw new Error("日历服务器返回了无效的 CalDAV 响应，已暂停同步以保留本地日程");
+  }
+  return doc;
+}
+
+/** 只忽略请求的日历集合本身；真实事件资源仍必须完整解析。 */
+function isCalendarCollection(href: string, baseUrl: string): boolean {
+  const resource = new URL(href, baseUrl);
+  const calendar = new URL(baseUrl);
+  return resource.origin === calendar.origin && resource.pathname.replace(/\/+$/, "") === calendar.pathname.replace(/\/+$/, "");
 }

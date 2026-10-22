@@ -19,6 +19,10 @@ export async function contentFingerprint(ev: CalendarEvent): Promise<string> {
     u: ev.url ?? "",
     r: ev.repeats?.rule ?? "",
     st: ev.status ?? "",
+    ...(ev.recurrenceId ? { ri: ev.recurrenceId } : {}),
+    ...(ev.recurrenceOverrides?.length ? { overrides: await Promise.all([...ev.recurrenceOverrides]
+      .sort((a, b) => (a.recurrenceId ?? "").localeCompare(b.recurrenceId ?? ""))
+      .map(async (o) => [o.recurrenceId, await contentFingerprint(o)])) } : {}),
     x: [...(ev.skippedDates ?? [])].sort(),
     m: [...(ev.reminderMinutes ?? [])].sort((a, b) => a - b),
   };

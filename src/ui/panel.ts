@@ -23,7 +23,7 @@ export interface PanelContext {
   /** 保存单条(新建/编辑整条);列表里多条一起保存(重复实例拆分)。 */
   saveEvents(events: CalendarEvent[]): void | Promise<void>;
   /** 打开编辑器:existing=null 为新建;defaultStartHHMM 提供默认开始时刻(HH:MM)。 */
-  openEditor(existing: CalendarEvent | null, defaultDate: string, defaultStartHHMM?: string, defaultEndHHMM?: string): void;
+  openEditor(existing: CalendarEvent | null, defaultDate: string, defaultStartHHMM?: string, defaultEndHHMM?: string, afterSave?: (ev: CalendarEvent) => Promise<void>): void;
   /** 本地未同步日程数。 */
   pendingLocal(): number;
   /** 视图内拖拽移动日程块后的结果回传(ISO 字符串)。 */
@@ -119,20 +119,16 @@ export class AgendaPanelView extends ItemView {
       return;
     }
     if (pick === "single") {
-      // 仅此实例:主事件跳过该日;生成同内容的一次性日程并打开编辑
-      const masterCopy: CalendarEvent = {
-        ...master,
-        skippedDates: [...new Set([...(master.skippedDates ?? []), dateKey(parseLocal(occ.start))])],
-      };
+      // 与主系列共用 UID，以 RECURRENCE-ID 保存单次修改；一次保存即可更新主系列。
       const override: CalendarEvent = {
         ...master,
-        id: crypto.randomUUID() + "@myagenda",
+        recurrenceId: occ.start,
         repeats: undefined,
+        recurrenceOverrides: undefined,
         skippedDates: undefined,
         startsAt: occ.start,
         endsAt: occ.end,
       };
-      await this.ctx.saveEvents([masterCopy]);
       this.ctx.openEditor(override, dateKey(parseLocal(occ.start)));
     }
   }
@@ -149,6 +145,8 @@ export class AgendaPanelView extends ItemView {
 
   /** 搜索输入时只重建结果区(strip/筛选/视图),头部与搜索行保持不动。 */
   private async renderResultsOnly(): Promise<void> {
+    // strip 被移出 results 挂在 contentEl 下(视觉置顶),重渲染时必须手动清掉,否则逐次累积
+    this.contentEl.querySelectorAll(".ag2-strip-host").forEach((el) => el.remove());
     const results = this.contentEl.querySelector<HTMLElement>(".ag2-results");
     if (!results) return void this.render();
     results.empty();
@@ -156,35 +154,30 @@ export class AgendaPanelView extends ItemView {
   }
 
   private async buildResults(results: HTMLElement): Promise<void> {
-    // 今日进度:日视图顶部显示"已过 x/全部 n"(呼应日记里的 dayProgress)
-    if (this.tab === "day") {
-      const all = await this.ctx.loadEvents();
-      const from = startOfDay(this.today());
-      const todays = expandOccurrences(all, from, addDays(from, 1));
-      if (todays.length > 0) {
-        const nowMin = this.today().getHours() * 60 + this.today().getMinutes();
-        const endMin = (o: Occurrence): number => {
-          const t = o.end ?? o.start;
-          return parseLocal(t).getHours() * 60 + parseLocal(t).getMinutes();
-        };
-        const passed = todays.filter((o) => endMin(o) <= nowMin).length;
-        const bar = results.createDiv({ cls: "ag2-todayprogress" });
-        bar.createDiv({ cls: "ag2-todayprogress-fill", attr: undefined }).style.width = `${Math.round((passed / todays.length) * 100)}%`;
-        bar.createDiv({ cls: "ag2-todayprogress-label", text: `${passed}/${todays.length}` });
-      }
-    }
-
     const body = results.createDiv({ cls: "ag2-body" });
 
     // 视图回调:重复事件先问"整条/仅此实例"
 
     try {
+      // 今日进度:日视图顶部显示"已过 x/全部 n"(完整时间戳比较:全天/跨零点事件不算已过)
+      if (this.tab === "day") {
+        const all = await this.ctx.loadEvents();
+        const from = startOfDay(this.today());
+        const todays = expandOccurrences(all, from, addDays(from, 1));
+        if (todays.length > 0) {
+          const now = this.today().getTime();
+          const passed = todays.filter((o) => parseLocal(o.end ?? o.start).getTime() <= now).length;
+          const bar = results.createDiv({ cls: "ag2-todayprogress" });
+          bar.createDiv({ cls: "ag2-todayprogress-fill" }).style.width = `${Math.round((passed / todays.length) * 100)}%`;
+          bar.createDiv({ cls: "ag2-todayprogress-label", text: `${passed}/${todays.length}` });
+        }
+      }
       const events = filterBySearch(await this.ctx.loadEvents(), this.searchQuery);
       const wsd = this.weekStartDay();
       const stripWeekStart = startOfWeek(this.anchor, wsd);
-      const stripOccs = expandOccurrences(events, stripWeekStart, addDays(stripWeekStart, 7));
       if (this.tab !== "month") {
-      const stripRow = results.createDiv();
+      const stripOccs = expandOccurrences(events, stripWeekStart, addDays(stripWeekStart, 7));
+      const stripRow = results.createDiv({ cls: "ag2-strip-host" });
       renderDateStrip(stripRow, {
         anchor: this.anchor,
         today: this.today(),
@@ -213,7 +206,14 @@ export class AgendaPanelView extends ItemView {
         cats.sort((a, b) => a.localeCompare(b));
       }
       for (const c of [...this.hiddenCats]) if (!cats.includes(c)) this.hiddenCats.delete(c);
-      const shown = cats.length >= 2 && this.hiddenCats.size > 0 ? events.filter((e) => (e.category ?? "").trim() !== "" && !this.hiddenCats.has((e.category ?? "").trim())) : events;
+      // 分类筛选:隐藏选中分类;无分类事件不参与筛选,始终显示
+      const shown =
+        cats.length >= 2 && this.hiddenCats.size > 0
+          ? events.filter((e) => {
+              const cat = (e.category ?? "").trim();
+              return cat === "" || !this.hiddenCats.has(cat);
+            })
+          : events;
 
       if (cats.length >= 2) {
         const bar = results.createDiv({ cls: "ag2-filter" });

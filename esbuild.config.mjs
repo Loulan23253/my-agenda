@@ -12,7 +12,7 @@ const context = await esbuild.context({
   // Obsidian desktop (Electron) runs a modern Chromium, so es2020 is safe;
   // keep it as the floor so modern dependency syntax (e.g. ical.js) isn't down-leveled.
   target: "es2020",
-  external: ["obsidian", "electron", ...builtinModules],
+  external: ["obsidian", "electron", "@codemirror/state", "@codemirror/view", ...builtinModules],
   sourcemap: prod ? false : "inline",
   treeShaking: true,
   logLevel: "info",

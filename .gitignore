@@ -1,0 +1,21 @@
+# Local dependencies and build caches
+node_modules/
+.DS_Store
+*.tsbuildinfo
+
+# Obsidian settings can contain CalDAV credentials.
+data.json
+.env
+.env.*
+!.env.example
+.myagenda/
+
+# Local diagnostics can read/write a real vault or remote calendars.
+dev/*
+!dev/selftest*.mts
+!dev/verify-audit.mts
+!dev/run-tests.mjs
+!dev/obsidian-cjs-stub.cjs
+
+# Prepared release artifacts
+release-prep/

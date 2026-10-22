@@ -40,9 +40,12 @@ export class VaultFileIO implements KeyValueFileIO {
   }
 
   async listFiles(dir: string): Promise<string[]> {
-    const f = this.vault.getAbstractFileByPath(normalizePath(dir));
-    if (!(f instanceof TFolder)) return [];
-    return f.children.filter((c): c is TFile => c instanceof TFile).map((c) => c.path);
+    const p = normalizePath(dir);
+    const f = this.vault.getAbstractFileByPath(p);
+    if (f instanceof TFolder) return f.children.filter((c): c is TFile => c instanceof TFile).map((c) => c.path);
+    // iCloud 下载/移动后索引可能滞后，不能把尚未索引的目录当作空目录。
+    if (!(await this.vault.adapter.exists(p))) return [];
+    return (await this.vault.adapter.list(p)).files;
   }
 
   async ensureDir(dir: string): Promise<void> {

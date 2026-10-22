@@ -36,6 +36,7 @@ export function planRecurringMove(
       ...current,
       id: crypto.randomUUID() + "@myagenda",
       repeats: undefined,
+      recurrenceOverrides: undefined,
       skippedDates: undefined,
       startsAt,
       endsAt,

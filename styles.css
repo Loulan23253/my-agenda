@@ -369,3 +369,21 @@
 .ag2-monthpill[draggable="true"] { cursor: grab; }
 .ag2-monthpill.is-dragging { opacity: 0.4; }
 .ag2-monthcell.ag2-month-drop { background: var(--ag-tint-softer); box-shadow: inset 0 0 0 1.5px var(--ag-tint); }
+
+/* 日记中的跳过/恢复按钮：只在界面显示，不写进 Markdown。 */
+button.ag2-inject-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-inline-start: 0.6em; padding: 0.1em 0.55em;
+  min-height: 24px; height: auto; border-radius: 6px;
+  border: 1px solid var(--background-modifier-border); box-shadow: none;
+  background: transparent; color: var(--text-muted);
+  font-size: 0.76em; font-weight: 400; line-height: 1.4; vertical-align: middle; cursor: pointer;
+}
+button.ag2-inject-action:hover, button.ag2-inject-action:focus-visible {
+  background: var(--background-modifier-hover); color: var(--text-normal);
+}
+.ag2-inject-restore {
+  display: inline-flex; align-items: center; gap: 0.15em;
+  margin: 0.3em 0.5em; color: var(--text-muted); font-size: 0.85em;
+}
+body.is-mobile button.ag2-inject-action { min-height: 32px; padding: 0.25em 0.65em; }

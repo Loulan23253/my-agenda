@@ -1,11 +1,12 @@
 {
   "name": "myagenda",
-  "version": "0.10.11",
-  "description": "Two-way iCloud / CalDAV calendar sync — Apple-style day, week & month views, recurring events, drag & drop, daily-note injection and reminders. Your credentials stay on your device.",
+  "version": "0.10.18",
+  "description": "Two-way calendar sync for Obsidian (clean-room v2 implementation)",
   "main": "main.js",
   "scripts": {
     "build": "tsc -noEmit && node esbuild.config.mjs production",
-    "dev": "node esbuild.config.mjs"
+    "dev": "node esbuild.config.mjs",
+    "test": "node dev/run-tests.mjs"
   },
   "private": true,
   "dependencies": {
@@ -17,7 +18,9 @@
     "jsdom": "^30.1.1",
     "obsidian": "latest",
     "tslib": "^2",
-    "typescript": "^5"
+    "typescript": "^5",
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6"
   },
   "license": "MIT",
   "repository": {

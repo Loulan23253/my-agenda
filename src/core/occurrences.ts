@@ -40,7 +40,7 @@ function expandSingle(ev: CalendarEvent, from: Date, to: Date): Occurrence[] {
       if (start >= from && start < to) out.push({ event: ev, start: ev.startsAt, end: ev.endsAt });
       return out;
     }
-    for (let d = startOfDay(start); d < end; d = addDays(d, 1)) {
+    for (let d = startOfDay(start > from ? start : from); d < end; d = addDays(d, 1)) {
       if (d >= to) break;
       if (d >= from) out.push({ event: ev, start: fmtDate(d), end: fmtDate(addDays(d, 1)) });
     }
@@ -50,7 +50,7 @@ function expandSingle(ev: CalendarEvent, from: Date, to: Date): Occurrence[] {
     if (start >= from && start < to) out.push({ event: ev, start: ev.startsAt, end: ev.endsAt });
     return out;
   }
-  for (let day = startOfDay(start); day <= startOfDay(end); day = addDays(day, 1)) {
+  for (let day = startOfDay(start > from ? start : from); day <= startOfDay(end); day = addDays(day, 1)) {
     const dayStart = startOfDay(day);
     const dayEnd = addDays(dayStart, 1);
     if (dayStart >= to) break;
@@ -66,29 +66,29 @@ function toIcalTime(iso: string, allDay: boolean): ICAL.Time {
   return allDay ? ICAL.Time.fromDateString(iso) : ICAL.Time.fromDateTimeString(iso);
 }
 
-export function expandOccurrences(events: CalendarEvent[], from: Date, to: Date): Occurrence[] {
+export function expandOccurrences(events: CalendarEvent[], from: Date, to: Date, splitDays = true): Occurrence[] {
   const out: Occurrence[] = [];
+  const emit = (event: CalendarEvent, start: string, end?: string) => {
+    const startDate = parseLocal(start);
+    const endDate = end ? parseLocal(end) : startDate;
+    if (startDate >= to || (endDate > startDate ? endDate <= from : startDate < from)) return;
+    if (splitDays) {
+      out.push(...expandSingle({ ...event, startsAt: start, endsAt: end }, from, to).map((occ) => ({ ...occ, event })));
+    } else out.push({ event, start, end });
+  };
   for (const ev of events) {
+    const overrides = ev.recurrenceOverrides ?? [];
+    for (const override of overrides) emit(override, override.startsAt, override.endsAt);
     if (!ev.repeats?.rule) {
-      out.push(...expandSingle(ev, from, to));
+      if (!overrides.length) emit(ev, ev.startsAt, ev.endsAt);
       continue;
     }
     // 排除实例:兼容完整时刻与纯日期两种存法(拖拽"仅此实例"写纯日期)
     const excludedFull = new Set((ev.skippedDates ?? []).map((s) => s.replace("Z", "")));
-    const excludedDay = new Set([...excludedFull].map((s) => s.slice(0, 10)));
+    const excludedDay = new Set([...excludedFull].filter((s) => !s.includes("T")));
+    for (const override of overrides) if (override.recurrenceId) excludedFull.add(override.recurrenceId);
     const dtstart = toIcalTime(ev.startsAt, ev.isAllDay);
     const duration = ev.endsAt ? toIcalTime(ev.endsAt, ev.isAllDay).subtractDate(dtstart) : null;
-    // DTSTART 远早于窗口时按频率粗跳(保守向下取整,停在窗口前留余量),
-    // 避免 10000 次 guard 耗尽导致老重复事件静默消失;iterator 从停点精细补齐
-    const daysBehind = (from.getTime() - dtstart.toJSDate().getTime()) / 86_400_000;
-    if (daysBehind > 400) {
-      const freq = (ev.repeats?.rule.toUpperCase().match(/FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)/) ?? [])[1];
-      if (freq) {
-        const chunk: Record<string, number> = { DAILY: 28, WEEKLY: 196, MONTHLY: 335, YEARLY: 3650 };
-        const steps = Math.max(0, Math.floor(daysBehind / (chunk[freq] ?? 28)) - 2);
-        for (let i = 0; i < steps; i++) dtstart.day += chunk[freq] ?? 28;
-      }
-    }
     let iter: ICAL.RecurIterator;
     try {
       iter = ICAL.Recur.fromString(ev.repeats.rule).iterator(dtstart);
@@ -96,12 +96,16 @@ export function expandOccurrences(events: CalendarEvent[], from: Date, to: Date)
       continue;
     }
     let next = iter.next();
+    // 迭代预算:DTSTART 距窗口每远一天多 1 次迭代(下限 10000),
+    // 保证 28 年前的 DAILY 重复事件也能走到当前窗口而 guard 不耗尽
+    const daysBehindIter = Math.max(0, Math.ceil((from.getTime() - dtstart.toJSDate().getTime()) / 86_400_000));
+    const guardLimit = Math.max(10_000, daysBehindIter + 4_000);
     let guard = 0;
-    while (next && guard < 10_000) {
+    while (next && guard < guardLimit) {
       guard++;
       const jsDate = next.toJSDate();
       if (jsDate >= to) break;
-      if (jsDate >= from) {
+      {
         const startIso = next.toString().replace("Z", "");
         if (!excludedFull.has(startIso) && !excludedDay.has(startIso.slice(0, 10))) {
           let endIso: string | undefined;
@@ -110,7 +114,7 @@ export function expandOccurrences(events: CalendarEvent[], from: Date, to: Date)
             c.addDuration(duration);
             endIso = c.toString().replace("Z", "");
           }
-          out.push({ event: ev, start: startIso, end: endIso });
+          emit(ev, startIso, endIso);
         }
       }
       next = iter.next();

@@ -157,7 +157,10 @@ export function sanitize(raw: unknown): Settings {
   const migrated = calendars.length ? calendars : sanitizeLegacyCalendars(r);
   return {
     lang: r.lang === "zh" || r.lang === "en" ? r.lang : "auto",
-    folder: str(r.folder, DEFAULTS.folder),
+    folder: str(r.folder, DEFAULTS.folder)
+      .split("/")
+      .filter((seg) => seg && seg !== "." && seg !== "..")
+      .join("/"),
     provider: r.provider === "icloud" || r.provider === "caldav" || r.provider === "ics"
       ? r.provider
       : "none",

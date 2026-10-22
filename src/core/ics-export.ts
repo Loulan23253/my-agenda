@@ -36,8 +36,12 @@ function addOneDay(dateKeyStr: string): string {
   return `${next.getFullYear()}${p(next.getMonth() + 1)}${p(next.getDate())}`;
 }
 
-function eventLines(ev: CalendarEvent): string[] {
-  const lines: string[] = ["BEGIN:VEVENT", `UID:${ev.id}`, `SUMMARY:${icsEscape(ev.title)}`];
+function eventLines(ev: CalendarEvent, dtstamp: string): string[] {
+  const lines: string[] = ["BEGIN:VEVENT", `DTSTAMP:${dtstamp}`, `UID:${ev.id}`, `SUMMARY:${icsEscape(ev.title)}`];
+  if (ev.recurrenceId) {
+    const rid = ev.recurrenceId.replace(/[-:]/g, "");
+    lines.push(`RECURRENCE-ID${ev.recurrenceId.includes("T") ? "" : ";VALUE=DATE"}:${rid}`);
+  }
   // iCloud 拒绝没有 DTEND 的 PUT(哪怕 RFC 5545 说可省):永远发送 DTEND。
   // 无结束时间 = 与开始相同(定时)/次日(全天,排他语义)。
   if (ev.isAllDay) {
@@ -77,7 +81,7 @@ function eventLines(ev: CalendarEvent): string[] {
     }
   }
   for (const m of ev.reminderMinutes ?? []) {
-    lines.push("BEGIN:VALARM", "ACTION:DISPLAY", `TRIGGER:-PT${Math.abs(m)}M`, "END:VALARM");
+    lines.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${icsEscape(ev.title)}`, `TRIGGER:-PT${Math.abs(m)}M`, "END:VALARM");
   }
   lines.push("END:VEVENT");
   return lines.map(fold);
@@ -90,7 +94,10 @@ export function buildIcs(events: CalendarEvent[]): string {
   const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//myagenda-v2//CN", "CALSCALE:GREGORIAN"];
   for (const ev of events) {
     if (!ev.id || !ev.startsAt) continue;
-    lines.push(`DTSTAMP:${dtstamp}`, ...eventLines(ev));
+    if (!ev.recurrenceId || !ev.recurrenceOverrides?.length) lines.push(...eventLines(ev, dtstamp));
+    for (const override of ev.recurrenceOverrides ?? []) {
+      lines.push(...eventLines({ ...override, id: ev.id, repeats: undefined, recurrenceOverrides: undefined }, dtstamp));
+    }
   }
   lines.push("END:VCALENDAR");
   return lines.join("\r\n") + "\r\n";

@@ -1,4 +1,4 @@
-import { Plugin, Notice, WorkspaceLeaf, TFile, TAbstractFile } from "obsidian";
+import { Plugin, Notice, WorkspaceLeaf, TFile, TAbstractFile, MarkdownRenderChild, MarkdownView, editorInfoField } from "obsidian";
 import * as obsidianModule from "obsidian";
 import { setLang, t } from "./l10n/strings";
 import { sanitize, type Settings } from "./kernel/settings";
@@ -16,7 +16,10 @@ import { parseLocal as parseLocalDate } from "./kernel/dates";
 import { AgendaPanelView, PANEL_VIEW_TYPE, type SyncStatus } from "./ui/panel";
 import {  askConflict, openSyncHistory, askChoice, openEventEditor , openDiscoverModal } from "./ui/modals";
 import { QuickAddModal } from "./ui/quick-add-modal";
-import { applyInjection, buildInjectList } from "./ui/inject";
+import { applyInjection, buildInjectList, listInjectedTasks, listSkippedTasks, skipInjectedTask, restoreSkippedTask } from "./ui/inject";
+import { observeInjectedPreview, injectionEditorExtension, type InjectionActions } from "./ui/inject-controls";
+import { updateEditorText } from "./ui/editor-update";
+import type { Editor } from "obsidian";
 import { dueReminders } from "./kernel/reminders";
 import { stripLegacyFromDaily, stripLegacyFromMonthly } from "./data/legacy-clean";
 import { planRecurringMove, type RecurMovePick } from "./core/recurrence-move";
@@ -31,6 +34,7 @@ export default class MyAgendaPluginV2 extends Plugin {
   settings!: Settings;
   private io!: KeyValueFileIO;
   private notes!: MonthlyNoteStore;
+  private storageFolder = "";
   private journal: SyncJournal = EMPTY_JOURNAL;
   private cache: { events: CalendarEvent[] } | null = null;
   private syncInFlight = false;
@@ -41,11 +45,13 @@ export default class MyAgendaPluginV2 extends Plugin {
   async onload(): Promise<void> {
     this.settings = sanitize(await this.loadData());
     this.io = new VaultFileIO(this.app.vault, this.app.fileManager);
-    this.notes = new MonthlyNoteStore(this.io, this.settings.folder);
+    this.storageFolder = this.settings.folder;
+    this.notes = new MonthlyNoteStore(this.io, this.storageFolder);
     await this.loadJournal();
     setLang(this.resolveLang());
     setCategoryColors(this.settings.categoryColors);
     this.addSettingTab(new SettingsTab(this.app, this));
+    this.registerInjectionControls();
 
     this.registerView(PANEL_VIEW_TYPE, (leaf: WorkspaceLeaf) =>
       new AgendaPanelView(leaf, {
@@ -57,12 +63,15 @@ export default class MyAgendaPluginV2 extends Plugin {
         onMove: (occ: Occurrence, startsAt: string, endsAt: string) =>
           void this.onMoveEvent(occ, startsAt, endsAt),
         onMoveToDay: (occ: Occurrence, toDay: Date) => void this.onMoveToDay(occ, toDay),
-        openEditor: (existing, defaultDate, defaultStartHHMM) =>
+        openEditor: (existing, defaultDate, defaultStartHHMM, defaultEndHHMM, afterSave) =>
           openEventEditor(
             this.app,
             existing,
             defaultDate,
-            (ev) => this.saveEventsList([ev]),
+            async (ev) => {
+              await this.saveEventsList([ev]);
+              if (afterSave) await afterSave(ev);
+            },
             existing
               ? (ev) => this.deleteEvent(ev)
               : undefined,
@@ -78,7 +87,10 @@ export default class MyAgendaPluginV2 extends Plugin {
     this.addRibbonIcon("calendar-days", t("cmd.openPanel"), () => void this.openPanel());
     this.addCommand({ id: "open-panel", name: t("cmd.openPanel"), callback: () => void this.openPanel() });
     this.addCommand({ id: "sync-now", name: t("cmd.sync"), callback: () => void this.syncNow() });
+    this.addCommand({ id: "audit-sync", name: "检查日历同步（只读）", callback: () => void this.auditSync() });
     this.addCommand({ id: "inject-daily", name: t("cmd.inject"), callback: () => void this.injectCommand() });
+    this.addCommand({ id: "skip-injected-task", name: t("cmd.skipInjected"), callback: () => void this.changeInjectedTask("skip") });
+    this.addCommand({ id: "restore-injected-task", name: t("cmd.restoreInjected"), callback: () => void this.changeInjectedTask("restore") });
     this.addCommand({
       id: "clear-calendar-local",
       name: t("cmd.clearLocal"),
@@ -135,8 +147,16 @@ export default class MyAgendaPluginV2 extends Plugin {
 
     this.register(() => this.stopAutoSync());
     this.restartAutoSync();
-    this.registerInterval(window.setInterval(() => void this.checkReminders(), 30_000));
-    this.app.workspace.onLayoutReady(() => { this.startReminderPolling(); void this.catchUpInjection(); });
+    // 提醒轮询由 startReminderPolling 的 60s 定时器统一负责(此前双定时器并存,重复展开浪费)
+    this.app.workspace.onLayoutReady(() => {
+      this.startReminderPolling(); void this.catchUpInjection();
+      for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+        if (leaf.view instanceof MarkdownView && leaf.view.file && /^\d{4}-\d{2}-\d{2}\.md$/.test(leaf.view.file.name) && this.inInjectScope(leaf.view.file.path)) {
+          leaf.view.previewMode.rerender(true);
+          leaf.view.editor.refresh();
+        }
+      }
+    });
   }
 
   private resolveLang(): "zh" | "en" {
@@ -157,12 +177,55 @@ export default class MyAgendaPluginV2 extends Plugin {
     return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
   }
 
-  private touchCache(path: string): void {
-    if (path === this.settings.folder || path.startsWith(this.settings.folder + "/")) this.cache = null;
+  private registerInjectionControls(): void {
+    const actions: InjectionActions = {
+      marker: () => this.settings.injectMarker,
+      eligible: (path) => /^\d{4}-\d{2}-\d{2}\.md$/.test(path.split("/").pop() ?? "") && this.inInjectScope(path),
+      skip: async (path, key) => {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile) await this.changeInjectedTask("skip", key, file);
+      },
+      restore: async (path, key) => {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile) await this.changeInjectedTask("restore", key, file);
+      },
+    };
+    this.registerEditorExtension(injectionEditorExtension(actions, (view) => view.state.field(editorInfoField, false)?.file?.path));
+    const children = new Set<MarkdownRenderChild>();
+    let live = true;
+    this.register(() => { live = false; for (const child of children) child.unload(); children.clear(); });
+    this.registerMarkdownPostProcessor(async (el, ctx) => {
+      if (!live || !actions.eligible(ctx.sourcePath)) return;
+      const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+      if (!(file instanceof TFile)) return;
+      const source = await this.app.vault.cachedRead(file);
+      if (!source.includes(this.settings.injectMarker)) return;
+      const section = ctx.getSectionInfo(el);
+      if (!live || (!section && !el.matches('li, .task-list-item, .callout') && !el.querySelector('li, .task-list-item, .callout'))) return;
+      const cleanup = observeInjectedPreview(el, source, file.path, section, actions);
+      const child = new MarkdownRenderChild(el);
+      children.add(child);
+      child.register(() => { cleanup(); children.delete(child); });
+      ctx.addChild(child);
+    }, 1000);
   }
 
+  private touchCache(path: string): void {
+    if (path === this.settings.folder || path.startsWith(this.settings.folder + "/")) {
+      this.cache = null;
+      // 外部改动(iCloud/Sync/手改)后节流刷新常开面板,避免显示陈旧数据
+      if (!this.touchRefreshTimer) {
+        this.touchRefreshTimer = window.setTimeout(() => {
+          this.touchRefreshTimer = null;
+          this.refreshPanels();
+        }, 600);
+      }
+    }
+  }
+  private touchRefreshTimer: number | null = null;
+
   private journalPath(): string {
-    return `${this.settings.folder}/.myagenda/journal.json`;
+    return `${this.storageFolder}/.myagenda/journal.json`;
   }
 
   private async loadJournal(): Promise<void> {
@@ -217,6 +280,26 @@ export default class MyAgendaPluginV2 extends Plugin {
       .map((c) => ({ id: c.id, url: c.url, name: c.name, category: c.category, auth }));
   }
 
+  private async auditSync(): Promise<void> {
+    const reports = await Promise.all(this.routes().map(async (route) => {
+      try {
+        const result = await obsidianHttp({
+          url: route.url, method: "REPORT",
+          headers: { Authorization: "Basic " + btoa(`${route.auth.user}:${route.auth.pass}`), Depth: "1", "Content-Type": "application/xml; charset=utf-8" },
+          body: '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"/></c:comp-filter></c:filter></c:calendar-query>',
+        });
+        const elements = Array.from(new DOMParser().parseFromString(result.text, "application/xml").getElementsByTagName("*"));
+        let events = 0;
+        const diagnostics = { skipped: 0 };
+        for (const el of elements.filter(e => e.localName === "calendar-data")) events += parseIcsToEvents(el.textContent || "", "", diagnostics).length;
+        if (result.status >= 200 && result.status < 300) await this.io.writeText(`${this.storageFolder}/.myagenda/recovery/${route.id}.xml`, result.text);
+        return { calendar: route.name, status: result.status, bytes: result.text.length, resources: elements.filter(e => e.localName === "response").length, events, skipped: diagnostics.skipped };
+      } catch (error) { return { calendar: route.name, error: error instanceof Error ? error.message : String(error) }; }
+    }));
+    await this.io.writeText(`${this.storageFolder}/.myagenda/connection-check.json`, JSON.stringify({ at: new Date().toISOString(), reports }, null, 2));
+    new Notice("只读检查完成，结果已保存到日程文件夹的 .myagenda/connection-check.json", 10000);
+  }
+
   private async syncNow(manual = true): Promise<void> {
     if (this.syncInFlight) {
       new Notice(t("notice.syncRunning"));
@@ -232,35 +315,22 @@ export default class MyAgendaPluginV2 extends Plugin {
     this.syncState = "busy";
     this.refreshPanels();
     try {
+      // 整个目录移动/尚未下载时，不能将读不到的事件作为删除推送到服务器。
+      if (Object.keys(this.journal.events).length > 0 && !(await this.app.vault.adapter.exists(this.storageFolder))) {
+        throw new Error(`日程存储文件夹不存在：${this.storageFolder}。请先在设置中选择移动后的文件夹。`);
+      }
       if (isIcs) {
         const res = await obsidianHttp({ url: this.settings.icsUrl, method: "GET" });
         if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
-        const events = parseIcsToEvents(res.text, "ics");
-        await this.writeAll(events);
+        const diagnostics = { skipped: 0 };
+        const events = parseIcsToEvents(res.text, "ics", diagnostics);
+        await this.writeAll(events, diagnostics.skipped === 0);
+        if (diagnostics.skipped) throw new Error(`${diagnostics.skipped} 个订阅日程无法解析，已保留旧日程并暂停删除`);
         this.syncState = "ok";
       } else {
         const engine = new SyncEngine({
           http: obsidianHttp,
           routes,
-        askCalendarsDeleted: async (names: string[]) => {
-          const pick = await askChoice(
-            this.app,
-            `${t("settings.cal.deleted.title")}\n${names.join(", ")}`,
-            [{ value: "remove", label: t("settings.cal.deleted.remove") }],
-          );
-          if (pick !== "remove") return false;
-          for (const name of names) {
-            const cal = this.settings.calendars.find((x) => (x.name || x.id) === name);
-            if (cal) {
-              await this.clearCalendarLocalEvents(cal);
-              if (this.journal.calendars[cal.id]) delete this.journal.calendars[cal.id];
-            }
-          }
-          this.settings.calendars = this.settings.calendars.filter((x) => !names.includes(x.name || x.id));
-          await this.saveSettings();
-          this.invalidate();
-          return true;
-        },
           notes: this.notes,
           journal: this.journal,
           saveJournal: () => this.saveJournal(),
@@ -269,11 +339,31 @@ export default class MyAgendaPluginV2 extends Plugin {
             manual && this.settings.conflictPolicy === "ask"
               ? askConflict(this.app, info)
               : "theirs",
+          askCalendarsDeleted: async (names) => {
+            const pick = await askChoice(
+              this.app,
+              `${t("settings.cal.deleted.title")}\n${names.join(", ")}`,
+              [{ value: "remove", label: t("settings.cal.deleted.remove") }],
+            );
+            if (pick !== "remove") return false;
+            for (const name of names) {
+              const cal = this.settings.calendars.find((x) => (x.name || x.id) === name);
+              if (cal) {
+                await this.clearCalendarLocalEvents(cal);
+                if (this.journal.calendars[cal.id]) delete this.journal.calendars[cal.id];
+              }
+            }
+            this.settings.calendars = this.settings.calendars.filter((x) => !names.includes(x.name || x.id));
+            await this.saveSettings();
+            this.invalidate();
+            return true;
+          },
           notify: (m) => new Notice(m, 10000),
           sleep,
         });
         const summary = await withNetworkRetry(() => engine.run());
-        void summary;
+        if (summary.failed) throw new Error(`${summary.failed} 个日程上传或删除未完成，已保留待同步记录`);
+        if (manual && summary.unmapped) new Notice(`${summary.unmapped} 个日程分类未匹配启用日历，已保留在本地；请先选择对应分类再上传`, 10000);
         this.syncState = "ok";
       }
       this.settings.lastSync = { at: new Date().toISOString(), ok: true };
@@ -295,15 +385,19 @@ export default class MyAgendaPluginV2 extends Plugin {
   }
 
   /** 全量重写月度文件(ICS 导入等无账本路径使用)。 */
-  private async writeAll(events: Awaited<ReturnType<MonthlyNoteStore["loadAll"]>>["events"]): Promise<void> {
+  private async writeAll(events: Awaited<ReturnType<MonthlyNoteStore["loadAll"]>>["events"], removeMissing = true): Promise<void> {
     // ICS 订阅 = 数据源:该月内容以订阅为准,但保留与订阅无关的既有本地日程
     const existing = (await this.notes.loadAll()).events;
     const importedIds = new Set(events.map((e) => e.id));
-    const merged = [...existing.filter((e) => !importedIds.has(e.id)), ...events];
-    const months = new Set(merged.map((e) => monthOf(e.startsAt)));
+    const removed = new Set(existing.filter((e) => removeMissing && e.id.startsWith("ics-") && !importedIds.has(e.id)).map((e) => e.id));
+    if (removed.size) await this.notes.removeByUids(removed);
+    const merged = [...existing.filter((e) => !importedIds.has(e.id) && !removed.has(e.id)), ...events];
+    // 月份并集:旧位置与新位置都要重写,否则订阅事件跨月移动后旧块残留
+    const months = new Set([...merged.map((e) => monthOf(e.startsAt)), ...existing.map((e) => monthOf(e.startsAt))]);
     for (const m of months) {
       const preamble = await this.notes.readMonthPreamble(m);
-      await this.notes.writeMonth(m, merged.filter((e) => monthOf(e.startsAt) === m), preamble);
+      // writeMonth 需要库内全量(其跨月清理按 id 全集判断),传子集会导致旧块残留
+      await this.notes.writeMonth(m, merged, preamble);
     }
   }
 
@@ -312,6 +406,16 @@ export default class MyAgendaPluginV2 extends Plugin {
     const all = (await this.notes.loadAll()).events;
     const oldById = new Map(all.map((e) => [e.id, e]));
     const merged = [...all];
+    const updatedById = new Map(oldById);
+    events = events.map((ev) => {
+      const master = updatedById.get(ev.id);
+      const updated = ev.recurrenceId && master
+        ? { ...master, recurrenceOverrides: [...(master.recurrenceOverrides ?? []).filter((o) => o.recurrenceId !== ev.recurrenceId),
+            { ...ev, repeats: undefined, recurrenceOverrides: undefined }] }
+        : ev;
+      updatedById.set(ev.id, updated);
+      return updated;
+    });
     for (const ev of events) {
       const idx = merged.findIndex((x) => x.id === ev.id);
       if (idx >= 0) merged[idx] = ev;
@@ -332,6 +436,7 @@ export default class MyAgendaPluginV2 extends Plugin {
     }
     this.invalidate();
     this.refreshPanels();
+    await this.refreshTodayInjection();
     void this.syncNow();
   }
 
@@ -349,6 +454,10 @@ export default class MyAgendaPluginV2 extends Plugin {
   private async onMoveEvent(occ: Occurrence, startsAt: string, endsAt: string): Promise<void> {
     const current = (await this.loadEvents()).find((e) => e.id === occ.event.id);
     if (!current) return;
+    if (occ.event.recurrenceId) {
+      await this.saveEventsList([{ ...occ.event, startsAt, endsAt }]);
+      return;
+    }
     if (current.repeats?.rule) {
       const occDay = dateKey(parseLocal(occ.start));
       const anchorDay = dateKey(parseLocal(current.startsAt));
@@ -375,11 +484,17 @@ export default class MyAgendaPluginV2 extends Plugin {
     const delta = Math.round((parseLocal(toKey).getTime() - parseLocal(fromDay).getTime()) / 86400000);
     const current = (await this.loadEvents()).find((e) => e.id === occ.event.id);
     if (!current) return;
+    if (occ.event.recurrenceId) {
+      await this.saveEventsList([{ ...occ.event, startsAt: shiftIsoDays(occ.event.startsAt, delta),
+        endsAt: occ.event.endsAt ? shiftIsoDays(occ.event.endsAt, delta) : undefined }]);
+      return;
+    }
     if (current.repeats?.rule) {
       const pick = await askChoice(this.app, t("recurrence.choice"), [
         { label: t("recurrence.series"), value: "series" },
         { label: t("recurrence.single"), value: "single" },
       ]);
+      if (!pick) return;
       if (pick === "series") {
         const newStart = shiftIsoDays(current.startsAt, delta);
         const shifted: CalendarEvent = {
@@ -399,6 +514,7 @@ export default class MyAgendaPluginV2 extends Plugin {
           ...current,
           id: crypto.randomUUID() + "@myagenda",
           repeats: undefined,
+          recurrenceOverrides: undefined,
           skippedDates: undefined,
           startsAt: shiftIsoDays(occ.start, delta),
           endsAt: occ.end ? shiftIsoDays(occ.end, delta) : undefined,
@@ -417,6 +533,10 @@ export default class MyAgendaPluginV2 extends Plugin {
 
   /** 删除日程:本地块移除 + 账本条目移除,同步时传播到服务器。 */
   private async deleteEvent(ev: CalendarEvent): Promise<void> {
+    if (ev.recurrenceId) {
+      await this.saveEventsList([{ ...ev, status: "cancelled" }]);
+      return;
+    }
     await this.notes.removeByUids(new Set([ev.id]));
     // 账本保留条目并置为待删:下轮同步据此删除服务器副本(若直接移除条目,远端会被当成新增而复活)
     const entry = this.journal.events[ev.id];
@@ -451,7 +571,7 @@ export default class MyAgendaPluginV2 extends Plugin {
     const uids = new Set<string>(events.map((e) => e.id));
     for (const id of Object.keys(this.journal.events)) uids.add(id);
     if (uids.size) await this.notes.removeByUids(uids);
-    this.journal = { ...EMPTY_JOURNAL };
+    this.journal = { version: 2, calendars: {}, events: {} }; // 深拷贝,避免共享 EMPTY_JOURNAL 内层引用
     await this.saveJournal();
     this.settings.user = "";
     this.settings.password = "";
@@ -538,8 +658,8 @@ export default class MyAgendaPluginV2 extends Plugin {
     }
     for (const month of months) {
       const preamble = await this.notes.readMonthPreamble(month);
-      const evs = byMonth.get(month) ?? [];
-      await this.notes.writeMonth(month, evs, preamble);
+      // 传库内全量(writeMonth 跨月清理按 id 全集判断)
+      await this.notes.writeMonth(month, all, preamble);
       n++;
     }
     this.invalidate();
@@ -552,21 +672,20 @@ export default class MyAgendaPluginV2 extends Plugin {
     return folder === "" || path === folder || path.startsWith(folder + "/");
   }
 
-  /** 同步成功后刷新今日注入:仅当注入块已存在(用户删了块就尊重),重建并保留勾选状态 */
+  /** 同步成功后补充今日缺失条目，保留已有条目和勾选状态 */
   private async refreshTodayInjection(): Promise<void> {
     if (!this.settings.injectEnabled) return;
     const name = dateKey(new Date()) + ".md";
     const found = this.app.vault.getMarkdownFiles().find((f) => f.name === name && this.inInjectScope(f.path));
     if (!found) return;
     try {
-      if (!(await this.app.vault.cachedRead(found)).includes("<!--ag2-injected-->")) return;
-      await this.injectIntoFile(found, true);
+      await this.injectIntoFile(found, false);
     } catch (e) {
       console.error("[myagenda-v2] injection refresh skipped", e);
     }
   }
 
-  /** 启动兜底:日记在插件加载前已建(创建事件已错过)→ 主动补注入(已有注入块则跳过) */
+  /** 启动兜底:日记在插件加载前已建(创建事件已错过)→ 主动补充缺失条目 */
   private async catchUpInjection(): Promise<void> {
     if (!this.settings.injectEnabled) return;
     const name = dateKey(new Date()) + ".md";
@@ -627,6 +746,47 @@ export default class MyAgendaPluginV2 extends Plugin {
     }
     const r = await this.injectIntoFile(file, true);
     if (r.status === "injected") new Notice(t("inject.done", { n: r.count ?? 0 }));
+  }
+
+  /** 只改变当前日记的注入记录，绝不取消、删除或完成云端日程。 */
+  private injectionEditor(file: TFile): Editor | undefined {
+    const active = this.app.workspace.getActiveViewOfType?.(MarkdownView);
+    if (active?.file?.path === file.path && active.getMode() === "source") return active.editor;
+    for (const leaf of this.app.workspace.getLeavesOfType?.("markdown") ?? []) {
+      const view = leaf.view;
+      if (view instanceof MarkdownView && view.file?.path === file.path && view.getMode() === "source") return view.editor;
+    }
+    return undefined;
+  }
+
+  private async changeInjectedTask(action: "skip" | "restore", selectedKey?: string, selectedFile?: TFile): Promise<void> {
+    const file = selectedFile ?? this.app.workspace.getActiveFile();
+    if (!file) { new Notice(t("inject.openFirst")); return; }
+    const dm = file.name.match(/^(\d{4}-\d{2}-\d{2})\.md$/);
+    if (!dm) { new Notice(t("inject.notDiary")); return; }
+    if (!this.inInjectScope(file.path)) { new Notice(t("inject.outsideFolder")); return; }
+    try {
+      const [y, mo, d] = dm[1].split("-").map(Number);
+      const day = startOfDay(new Date(y, mo - 1, d));
+      const items = action === "skip" ? buildInjectList(expandOccurrences(await this.loadEvents(), day, addDays(day, 1))) : [];
+      const content = this.injectionEditor(file)?.getValue() ?? await this.app.vault.read(file);
+      const tasks = action === "skip" ? listInjectedTasks(content, this.settings.injectMarker, items) : listSkippedTasks(content, this.settings.injectMarker);
+      if (!tasks.length) { new Notice(t(action === "skip" ? "inject.noSkippable" : "inject.noSkipped")); return; }
+      const key = selectedKey ?? await askChoice(this.app, t(action === "skip" ? "cmd.skipInjected" : "cmd.restoreInjected"),
+        tasks.map((task) => ({ value: task.key, label: task.label })));
+      if (key == null) return;
+      let changed = false;
+      const update = (current: string) => action === "skip" ? skipInjectedTask(current, this.settings.injectMarker, key, items) : restoreSkippedTask(current, this.settings.injectMarker, key);
+      const editor = this.injectionEditor(file);
+      if (editor) changed = updateEditorText(editor, update);
+      else await this.app.vault.process(file, (current) => {
+        const next = update(current); changed = next !== current; return next;
+      });
+      new Notice(t(changed ? action === "skip" ? "inject.skippedTask" : "inject.restoredTask" : "inject.taskChanged"));
+    } catch (e) {
+      console.error("[myagenda-v2] daily task update failed", e);
+      new Notice(t("inject.updateFailed"));
+    }
   }
 
   private async onFileCreate(file: TAbstractFile): Promise<void> {
@@ -733,6 +893,30 @@ export default class MyAgendaPluginV2 extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    if (this.settings.folder !== this.storageFolder) {
+      if (this.syncInFlight) {
+        this.settings.folder = this.storageFolder;
+        new Notice("同步正在进行，请等待结束后再更改存储文件夹");
+      } else {
+        const previous = { folder: this.storageFolder, notes: this.notes, journal: this.journal };
+        // 路径、笔记仓库和账本必须一起切换；期间阻止新同步启动。
+        this.syncInFlight = true;
+        try {
+          this.storageFolder = this.settings.folder;
+          this.notes = new MonthlyNoteStore(this.io, this.storageFolder);
+          await this.loadJournal();
+          this.invalidate();
+          this.refreshPanels();
+        } catch (error) {
+          this.storageFolder = this.settings.folder = previous.folder;
+          this.notes = previous.notes;
+          this.journal = previous.journal;
+          throw error;
+        } finally {
+          this.syncInFlight = false;
+        }
+      }
+    }
     await this.saveData(this.settings);
   }
   async saveData(data: unknown): Promise<void> {
@@ -741,6 +925,10 @@ export default class MyAgendaPluginV2 extends Plugin {
   }
   onunload(): void {
     this.stopAutoSync();
+    if (this.touchRefreshTimer !== null) {
+      window.clearTimeout(this.touchRefreshTimer);
+      this.touchRefreshTimer = null;
+    }
     if (this.reminderTimer !== null) {
       window.clearInterval(this.reminderTimer);
       this.reminderTimer = null;

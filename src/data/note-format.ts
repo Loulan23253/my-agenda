@@ -72,7 +72,7 @@ export function parseMonthlyNote(text: string): ParsedMonthlyNote {
 }
 
 /** v2 字段名(与 v1 的 uid/start/end/all_day 有意不同,便于区分来源)。 */
-const V2_KEYS = ["id", "starts", "ends", "allday", "tz", "place", "category", "organizer", "attendees", "url", "repeat", "skip", "remind", "status"] as const;
+const V2_KEYS = ["id", "starts", "ends", "allday", "tz", "place", "category", "organizer", "attendees", "url", "repeat", "skip", "remind", "status", "overrides", "recurrence_id"] as const;
 /** v1 遗留字段名 → v2 含义(迁移器只读取,不再写回)。 */
 const V1_ALIASES: Record<string, string> = {
   uid: "id",
@@ -114,7 +114,9 @@ export function blockToEvent(block: NoteBlock): CalendarEvent | null {
   const allday = allDayRaw !== undefined ? allDayRaw === "true" : !starts.includes("T");
   const ev: CalendarEvent = {
     id,
-    title: block.heading.replace(/^\d{1,2}:\d{2}([-–—]\d{1,2}:\d{2})?\s*/, "").trim() || block.heading.trim(),
+    title: allday
+      ? block.heading.trim()
+      : block.heading.replace(/^\d{1,2}:\d{2}([-–—]\d{1,2}:\d{2})?\s*/, "").trim() || block.heading.trim(),
     startsAt: starts,
     // 历史数据可能存有"结束<=开始"(跨午夜取模 bug):加载即归一化,渲染与推送都用合法值
     endsAt: ends && !allday && ends <= starts ? normalizeEnd(starts, ends) : ends,
@@ -135,6 +137,16 @@ export function blockToEvent(block: NoteBlock): CalendarEvent | null {
   if (url) ev.url = url;
   const repeat = readField(block.fields, "repeat");
   if (repeat) ev.repeats = { rule: repeat };
+  const recurrenceId = readField(block.fields, "recurrence_id");
+  if (recurrenceId) ev.recurrenceId = recurrenceId;
+  const overrides = readField(block.fields, "overrides");
+  if (overrides) {
+    try {
+      const parsed: unknown = JSON.parse(overrides);
+      if (!Array.isArray(parsed) || parsed.some((x) => !x || typeof x.recurrenceId !== "string" || typeof x.startsAt !== "string" || typeof x.title !== "string")) return null;
+      ev.recurrenceOverrides = parsed.map((x) => ({ ...x, id, repeats: undefined, recurrenceOverrides: undefined }));
+    } catch { return null; }
+  }
   const skip = readField(block.fields, "skip");
   if (skip) ev.skippedDates = skip.split(",").map((x) => x.trim()).filter(Boolean);
   const remind = readField(block.fields, "remind");
@@ -175,6 +187,8 @@ export function eventToFields(ev: CalendarEvent): Record<string, string> {
   if (ev.organizer) f.organizer = ev.organizer;
   if (ev.attendees?.length) f.attendees = ev.attendees.join(", ");
   if (ev.url) f.url = ev.url;
+  if (ev.recurrenceId) f.recurrence_id = ev.recurrenceId;
+  if (ev.recurrenceOverrides?.length) f.overrides = JSON.stringify(ev.recurrenceOverrides);
   if (ev.repeats) f.repeat = ev.repeats.rule;
   if (ev.skippedDates?.length) f.skip = ev.skippedDates.join(", ");
   if (ev.reminderMinutes?.length) f.remind = ev.reminderMinutes.join(", ");
@@ -185,17 +199,17 @@ const META_KEYS = new Set(["etag", "href", "base_hash", "origin", "server_delete
 
 export function serializeBlock(ev: CalendarEvent, existing?: NoteBlock): string {
   const fields = eventToFields(ev);
+  if (ev.status) fields["status"] = oneLine(ev.status);
   for (const k of Object.keys(fields)) fields[k] = oneLine(fields[k]);
-  if (ev.status) fields["status"] = ev.status; // 必须在 order 计算前写入,否则新块/状态变更不会落盘
   const order = existing?.fieldOrder.filter((k) => k in fields) ?? [];
   for (const k of Object.keys(fields)) if (!order.includes(k)) order.push(k);
-  // 未知键透传:v1 的 source/protocol/seq 等扩展字段原样保留
+  // 透传:v1 未知扩展键(source/protocol/seq)原样保留。
+  // v2 已知键即使事件上已清空也不透传(否则删除的字段会从旧块"复活")
   const passthrough: string[] = [];
   for (const k of existing?.fieldOrder ?? []) {
-    if (!(k in fields) && !META_KEYS.has(k) && !passthrough.includes(k)) passthrough.push(k);
+    if (!(k in fields) && !META_KEYS.has(k) && !(V2_KEYS as readonly string[]).includes(k) && !passthrough.includes(k)) passthrough.push(k);
   }
   const heading = eventHeading(ev);
-  if (ev.status) fields["status"] = ev.status;
   const fieldLines = order.map((k) => `- ${k}:: ${fields[k]}`);
   for (const k of passthrough) fieldLines.push(`- ${k}:: ${existing!.fields[k]}`);
   const prose = ev.notes ? `\n\n${escapeText(ev.notes)}` : "";
