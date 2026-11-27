@@ -17,4 +17,4 @@ class Setting { setName() { return this; } setDesc() { return this; } setHeading
 class TFile {} class TFolder {} class WorkspaceLeaf {} class Component {}
 const setIcon = () => {}; const requestUrl = async () => ({ status: 0, text: "", headers: {} });
 const normalizePath = (p) => p; const addIcon = () => {}; const moment = (x) => x;
-module.exports = { ItemView, Plugin, Modal, Notice, PluginSettingTab, Setting, TFile, TFolder, WorkspaceLeaf, Component, setIcon, requestUrl, normalizePath, addIcon, moment };
+module.exports = { requireApiVersion: () => false, getLanguage: () => "en", ItemView, Plugin, Modal, Notice, PluginSettingTab, Setting, TFile, TFolder, WorkspaceLeaf, Component, setIcon, requestUrl, normalizePath, addIcon, moment };

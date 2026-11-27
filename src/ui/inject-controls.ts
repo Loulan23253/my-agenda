@@ -11,7 +11,7 @@ export interface InjectionActions {
 }
 
 function actionButton(doc: Document, label: string, title: string, action: () => Promise<void>): HTMLButtonElement {
-  const button = doc.createElement('button');
+  const button = doc.createDocumentFragment().createEl('button');
   button.type = 'button';
   button.className = 'ag2-inject-action';
   button.textContent = label;
@@ -19,13 +19,16 @@ function actionButton(doc: Document, label: string, title: string, action: () =>
   button.setAttribute('aria-label', title);
   // 点击按钮不能顺便切换完成状态或把光标移进注释。
   button.addEventListener('mousedown', (event) => { event.preventDefault(); event.stopPropagation(); });
-  button.addEventListener('click', async (event) => {
+  button.addEventListener('click', (event) => {
     event.preventDefault(); event.stopPropagation();
     if (button.disabled) return;
     button.disabled = true;
-    try { await action(); }
-    catch (error) { console.error('[myagenda-v2] injection action failed', error); }
-    finally { button.disabled = false; }
+    void runAction();
+    async function runAction(): Promise<void> {
+      try { await action(); }
+      catch (error) { console.error('[myagenda] injection action failed', error); }
+      finally { button.disabled = false; }
+    }
   });
   return button;
 }
@@ -33,11 +36,11 @@ function actionButton(doc: Document, label: string, title: string, action: () =>
 function restoreControl(doc: Document, source: string, path: string, actions: InjectionActions): HTMLElement | undefined {
   const skipped = listSkippedTasks(source, actions.marker());
   if (!skipped.length) return undefined;
-  const span = doc.createElement('span');
+  const span = doc.createDocumentFragment().createSpan();
   span.className = 'ag2-inject-restore';
-  const count = doc.createElement('span');
+  const count = span.createSpan();
   count.textContent = t('inject.skippedCount', { n: skipped.length });
-  span.append(count, actionButton(doc, t('inject.restoreButton'), t('cmd.restoreInjected'),
+  span.append(actionButton(doc, t('inject.restoreButton'), t('cmd.restoreInjected'),
     () => actions.restore(path, skipped.length === 1 ? skipped[0].key : undefined)));
   return span;
 }

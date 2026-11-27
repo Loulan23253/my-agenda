@@ -2,6 +2,24 @@
 
 Obsidian 日程插件，支持 CalDAV / iCloud 双向同步、ICS 订阅、重复日程、提醒，以及将当日日程注入日记。
 
+MyAgenda is a calendar for Obsidian. View and edit events, sync with iCloud or CalDAV, subscribe to ICS feeds, and add the day’s events to your daily note.
+
+[English installation](#installation) · [English usage](#usage) · [中文安装](#安装) · [日记注入](#日记注入)
+
+## Installation
+
+Requires Obsidian 1.7.2 or later.
+
+1. Download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/Loulan23253/my-agenda/releases/latest).
+2. In your vault, create `.obsidian/plugins/myagenda/` and place the three files there.
+3. Restart Obsidian, open **Settings → Community plugins**, and enable **MyAgenda**.
+
+## Usage
+
+- Run **MyAgenda: Open agenda panel** from the command palette. Choose a day, week or month, then use the **+** button to create an event. Select an event to edit it.
+- For sync, open the MyAgenda settings, choose your calendar provider, and select the calendars to include. iCloud requires an Apple app-specific password. You can also use MyAgenda with local events only.
+- To add events to a daily note, add the marker `> [!todo]+ todo` to a note named `YYYY-MM-DD.md` and enable automatic injection in the plugin settings. Use **Skip** beside an inserted task to hide that occurrence, or **Restore** to bring it back.
+
 ## 安装
 
 需要 Obsidian 1.7.2 或更高版本。

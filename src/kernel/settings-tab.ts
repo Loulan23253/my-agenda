@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, type SettingDefinitionItem, type SettingDefinitionGroup, type SettingGroupItem } from "obsidian";
+import { requireApiVersion, App, PluginSettingTab, Setting, type SettingDefinitionItem, type SettingDefinitionGroup, type SettingGroupItem } from "obsidian";
 import { askChoice } from "../ui/modals";
 import { setCategoryColors } from "../ui/palette";
 import { t } from "../l10n/strings";
@@ -12,6 +12,10 @@ export class SettingsTab extends PluginSettingTab {
   }
 
   display(): void {
+    this.renderLegacySettings();
+  }
+
+  private renderLegacySettings(): void {
     const { containerEl } = this;
     const s = this.plugin.settings;
     containerEl.empty();
@@ -31,7 +35,7 @@ export class SettingsTab extends PluginSettingTab {
           s.lang = v as Settings["lang"];
           await this.plugin.saveSettings();
           this.plugin.applyLanguage();
-          this.display();
+          this.renderLegacySettings();
         });
       });
 
@@ -46,7 +50,7 @@ export class SettingsTab extends PluginSettingTab {
         d.onChange(async (v) => {
           s.provider = v as Settings["provider"];
           await this.plugin.saveSettings();
-          this.display();
+          this.renderLegacySettings();
         });
       });
 
@@ -99,7 +103,7 @@ export class SettingsTab extends PluginSettingTab {
             if (v) {
               cal.enabled = true;
               await this.plugin.saveSettings();
-              this.display();
+              this.renderLegacySettings();
               return;
             }
             // 关闭同步:询问是否同时清空该日历在笔记中的现有日程(iCloud 上保留)
@@ -112,20 +116,20 @@ export class SettingsTab extends PluginSettingTab {
               ],
             );
             if (choice === null) {
-              this.display(); // 取消:回滚开关
+              this.renderLegacySettings(); // 取消:回滚开关
               return;
             }
             cal.enabled = false;
             await this.plugin.saveSettings();
             if (choice === "clear") await this.plugin.clearCalendarLocalEvents(cal);
-            this.display();
+            this.renderLegacySettings();
           }),
         );
         row.addExtraButton((b) =>
           b.setIcon("trash").onClick(async () => {
             s.calendars = s.calendars.filter((x) => x !== cal);
             await this.plugin.saveSettings();
-            this.display();
+            this.renderLegacySettings();
           }),
         );
       }
@@ -179,7 +183,7 @@ export class SettingsTab extends PluginSettingTab {
           ]);
           if (c !== "reset") return;
           await this.plugin.resetAllSyncData();
-          this.display();
+          this.renderLegacySettings();
         }),
       );
 
@@ -446,7 +450,7 @@ export class SettingsTab extends PluginSettingTab {
                 ]);
                 if (c !== "reset") return;
                 await this.plugin.resetAllSyncData();
-                this.display();
+                if (requireApiVersion("1.13.0")) this.update();
               }),
             );
           },
@@ -479,9 +483,7 @@ export class SettingsTab extends PluginSettingTab {
       await this.plugin.saveSettings();
       this.plugin.applyLanguage();
       // 1.13 声明式框架缓存了 getSettingDefinitions() 的结果,语言变更后必须通知重取,否则页面停留旧语言。
-      // update() 是 1.13 API:此回调仅 1.13+ 框架会调用,但仍做存在检查,动态访问避免静态判定为不支持 API
-      const refresh = (this as unknown as { update?: () => void }).update;
-      if (typeof refresh === "function") refresh.call(this);
+      if (requireApiVersion("1.13.0")) this.update();
       return;
     }
     if (key === "autoSyncMinutes") { s.autoSyncMinutes = Number(value); await this.plugin.saveSettings(); this.plugin.restartAutoSync(); return; }

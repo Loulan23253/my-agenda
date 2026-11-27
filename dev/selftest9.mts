@@ -91,6 +91,8 @@ interface PluginExt {
   commands: { id: string }[];
   data: unknown;
   savedData: Record<string, unknown> | undefined;
+  resolveLang(): string;
+  monthActivity: unknown[];
   onload(): Promise<void>;
   resetAllSyncData(): Promise<void>;
   clearCalendarLocalEvents(cal: { id: string; name: string }): Promise<void>;
@@ -174,8 +176,10 @@ interface PluginHandle {
 }
 
 /** 内存 vault(路径→内容)+ 真实插件 onload;seed 预置文件,data 预置 data.json。 */
-const makePlugin = async (opts: { data?: Record<string, unknown>; seed?: Record<string, string> } = {}): Promise<PluginHandle> => {
+const makePlugin = async (opts: { data?: Record<string, unknown>; seed?: Record<string, string>; recent?: unknown[] } = {}): Promise<PluginHandle> => {
   const stub = makeStubModule();
+  stub.exports.requireApiVersion = (version: string) => opts.recent !== undefined && version === "1.8.7";
+  if (opts.recent) stub.exports.getLanguage = () => "en";
   const bundle = loadBundle(stub.exports);
   const files = new Map<string, string>();
   for (const [p, c] of Object.entries(opts.seed ?? {})) files.set(p, c);
@@ -220,6 +224,7 @@ const makePlugin = async (opts: { data?: Record<string, unknown>; seed?: Record<
   };
   const app = {
     vault,
+    ...(opts.recent && { loadLocalStorage: () => opts.recent, saveLocalStorage: () => {} }),
     fileManager: { trashFile: async (f: { path: string }) => { files.delete(f.path); } },
     workspace: {
       getLeavesOfType: () => [] as unknown[],
@@ -233,6 +238,16 @@ const makePlugin = async (opts: { data?: Record<string, unknown>; seed?: Record<
   await plugin.onload();
   return { plugin, bundle, files, notices: stub.notices };
 };
+
+{
+  globalThis.document = new JSDOM('<html lang="zh-CN"></html>').window.document;
+  const legacy = await makePlugin({ data: { lang: "auto" } });
+  eq("1.7.2 uses the interface language without newer APIs", legacy.plugin.resolveLang(), "zh");
+  const row = { at: "2026-01-01", file: "2026-01.md", kind: "saved", syncing: false };
+  const modern = await makePlugin({ data: { lang: "auto" }, recent: [null, { kind: "bad" }, row] });
+  eq("1.8.7 reads the app language", modern.plugin.resolveLang(), "en");
+  eq("Invalid diagnostic cache entries are skipped", modern.plugin.monthActivity, [row]);
+}
 
 const baseData = (): Record<string, unknown> => ({
   folder: "Agenda",

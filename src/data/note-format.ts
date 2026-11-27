@@ -4,7 +4,35 @@
  * 供迁移器把旧数据搬进账本。
  */
 import type { CalendarEvent } from "../model/event";
+import { isRecord } from "../model/record";
 import { normalizeEnd } from "../kernel/dates";
+
+function readOverride(value: unknown, id: string): CalendarEvent | undefined {
+  if (!isRecord(value) || typeof value.title !== "string" || typeof value.startsAt !== "string" ||
+      typeof value.recurrenceId !== "string") return undefined;
+  const event: CalendarEvent = {
+    ...value, repeats: undefined, recurrenceOverrides: undefined,
+    id, title: value.title, startsAt: value.startsAt, recurrenceId: value.recurrenceId,
+    isAllDay: typeof value.isAllDay === "boolean" ? value.isAllDay : value.startsAt.length === 10,
+  };
+  for (const key of ["endsAt", "timeZone", "place", "notes", "category", "organizer", "url", "status"] as const) {
+    const field = value[key];
+    if (field !== undefined && typeof field !== "string") return undefined;
+    if (field !== undefined) event[key] = field;
+  }
+  for (const key of ["attendees", "skippedDates"] as const) {
+    const field = value[key];
+    if (field === undefined) continue;
+    if (!Array.isArray(field) || !field.every((v: unknown): v is string => typeof v === "string")) return undefined;
+    event[key] = field;
+  }
+  const minutes = value.reminderMinutes;
+  if (minutes !== undefined) {
+    if (!Array.isArray(minutes) || !minutes.every((v: unknown): v is number => typeof v === "number" && Number.isFinite(v))) return undefined;
+    event.reminderMinutes = minutes;
+  }
+  return event;
+}
 
 export const MONTH_FILE_RE = /^\d{4}-\d{2}\.md$/;
 
@@ -143,8 +171,13 @@ export function blockToEvent(block: NoteBlock): CalendarEvent | null {
   if (overrides) {
     try {
       const parsed: unknown = JSON.parse(overrides);
-      if (!Array.isArray(parsed) || parsed.some((x) => !x || typeof x.recurrenceId !== "string" || typeof x.startsAt !== "string" || typeof x.title !== "string")) return null;
-      ev.recurrenceOverrides = parsed.map((x) => ({ ...x, id, repeats: undefined, recurrenceOverrides: undefined }));
+      if (!Array.isArray(parsed)) return null;
+      ev.recurrenceOverrides = [];
+      for (const entry of parsed) {
+        const override = readOverride(entry, id);
+        if (!override) return null;
+        ev.recurrenceOverrides.push(override);
+      }
     } catch { return null; }
   }
   const skip = readField(block.fields, "skip");

@@ -1,5 +1,21 @@
 # 更新记录
 
+## 0.10.20 — 2026-11-28
+
+### 中文
+
+- 保留对 Obsidian 1.7.2 的支持，按版本读取界面语言与月度诊断缓存。损坏的缓存条目会被跳过。
+- 校验重复日程的单次例外和日记中的跳过标记。更新跳过、恢复按钮以及设置页的刷新方式。
+- 简化月视图和编辑器样式，保留三条日程的默认行高、跨月分界和标题输入时的无外框样式。备注使用原生换行。
+- 补充英文安装与使用说明。
+
+### English
+
+- Keep support for Obsidian 1.7.2. Language detection and monthly diagnostics use the APIs available in each version. Invalid diagnostic entries are skipped.
+- Validate recurring event overrides and skipped-task markers. Update the daily-note buttons and settings refresh.
+- Simplify the month view and editor styles while preserving three event slots per week, month boundaries and the title field’s focus appearance. Notes use native line breaks.
+- Add English installation and usage instructions.
+
 ## 0.10.19 — 2026-11-27
 
 ### 中文

@@ -21,8 +21,8 @@ export function parseIcsToEvents(icsText: string, idPrefix = "", diagnostics?: {
     const end = ev.endDate;
     const isAllDay = start.isDate;
     // TZID 在属性参数上(与 VTIMEZONE 注册无关——带 TZNAME 的 VTIMEZONE 会让 ical.js 退化成 floating)
-    const startTzid = vevent.getFirstProperty("dtstart")?.getFirstParameter("tzid") as string | undefined;
-    const endTzid = vevent.getFirstProperty("dtend")?.getFirstParameter("tzid") as string | undefined;
+    const startTzid = vevent.getFirstProperty("dtstart")?.getFirstParameter("tzid");
+    const endTzid = vevent.getFirstProperty("dtend")?.getFirstParameter("tzid");
     const ev2: CalendarEvent = {
       id: idPrefix ? `${idPrefix}-${uid}` : uid,
       title: ev.summary || t("sync.untitled"),
@@ -63,7 +63,7 @@ export function parseIcsToEvents(icsText: string, idPrefix = "", diagnostics?: {
         } catch {
           continue; // 毒 EXDATE(如值类型与 DTSTART 不符):跳过该属性,不拖垮整轮解析
         }
-        const exTzid = prop.getFirstParameter("tzid") as string | undefined;
+        const exTzid = prop.getFirstParameter("tzid");
         for (const v of vals) {
           if (v && typeof (v as ICAL.Time).toString === "function") {
             const t = v as ICAL.Time;
@@ -89,7 +89,7 @@ export function parseIcsToEvents(icsText: string, idPrefix = "", diagnostics?: {
     const rid = vevent.getFirstProperty("recurrence-id");
     if (rid) {
       const value = rid.getFirstValue() as ICAL.Time;
-      ev2.recurrenceId = value.isDate ? value.toString().slice(0, 10) : icalToLocalIso(value, rid.getFirstParameter("tzid") as string | undefined);
+      ev2.recurrenceId = value.isDate ? value.toString().slice(0, 10) : icalToLocalIso(value, rid.getFirstParameter("tzid"));
       ev2.repeats = undefined;
       overrides.push(ev2);
     } else if (!out.some((e) => e.id === ev2.id)) out.push(ev2);
@@ -165,6 +165,4 @@ export function icalToLocalIso(t: ICAL.Time, tzid?: string): string {
     /* 时区换算失败按 floating 墙钟兜底 */
   }
   return `${t.year}-${p(t.month)}-${p(t.day)}T${p(t.hour)}:${p(t.minute)}:${p(t.second)}`;
-}function normalizeIso(s: string, isAllDay: boolean): string {
-  return isAllDay ? s.slice(0, 10) : s.replace("Z", "");
 }

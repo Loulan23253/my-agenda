@@ -191,16 +191,19 @@ export function renderMonthView(container: HTMLElement, events: CalendarEvent[],
     list.push(o);
     byDay.set(k, list);
   }
+  const previousMonthEnd = addDays(first, -1).getTime();
   const monthLabel = new Intl.DateTimeFormat(getLang(), { month: "short" });
   for (let i = 0; i < 42; i++) {
     const day = addDays(gridStart, i);
     const cell = grid.createDiv({ cls: "ag2-monthcell" });
     if (day.getDay() === 0 || day.getDay() === 6) cell.addClass("is-weekend");
     if (day.getMonth() !== a.getMonth()) cell.addClass("is-other");
+    if (day.getTime() === previousMonthEnd && i % 7 !== 6) cell.addClass("ag2-month-edge");
+    if (day.getDate() === 1 && i > 0 && i % 7 === 0) cell.addClass("ag2-month-week-edge");
     if (key(day) === key(deps.today)) cell.addClass("is-today");
     const stamp = cell.createDiv({ cls: "ag2-monthstamp" });
     if (i === 0 || day.getDate() === 1) {
-      stamp.createEl("span", { cls: "ag2-monthmark", text: monthLabel.format(day) });
+      stamp.createSpan({ cls: "ag2-monthmark", text: monthLabel.format(day) });
     }
     const num = stamp.createDiv({ cls: "ag2-monthday", text: String(day.getDate()) });
     if (key(day) === key(deps.anchor)) num.addClass("is-selected");
@@ -232,6 +235,7 @@ export function renderMonthView(container: HTMLElement, events: CalendarEvent[],
     }
     const extra = list.length - 3;
     if (extra > 0) {
+      cell.addClass("ag2-month-overflow");
       const more = cell.createDiv({ cls: "ag2-monthmore", text: `+${extra}` });
       more.addEventListener("click", (e) => {
         e.stopPropagation();

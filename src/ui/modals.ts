@@ -1,4 +1,4 @@
-import { App, Modal, Notice } from "obsidian";
+import { App, Modal } from "obsidian";
 import { t, getLang } from "../l10n/strings";
 import type { CalendarEvent } from "../model/event";
 import type { DiscoveredCalendar } from "../sync/dav";
@@ -312,15 +312,6 @@ export function openEventEditor(
   notesInput.addEventListener("input", () => {
     notesInput.toggleClass("is-empty", !(notesInput.textContent || "").trim());
   });
-  // plaintext-only 的回车换行显式处理,保证 textContent 保留 
-
-  notesInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      window.document.execCommand("insertLineBreak");
-    }
-  });
-
   const readBack = (): CalendarEvent => {
     const s = allday.checked
       ? startInput.value

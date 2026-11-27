@@ -1,3 +1,4 @@
+import { isRecord } from "../model/record";
 /**
  * 日记注入:把当天日程以 `>>- [ ]` 待办清单注入到标记行之后。
  * 幂等:force=false 仅追加缺失条目、force=true 重建;绝不触碰用户内容。
@@ -140,8 +141,8 @@ function skippedTask(row: string): InjectedTask | undefined {
   const match = SKIP_MARK.exec(row);
   if (!match) return undefined;
   try {
-    const record = JSON.parse(decodeURIComponent(match[1]));
-    if (typeof record.row !== "string" || /\n|\r(?!$)/.test(record.row) || !INJECT_ROW.test(record.row.trim())) return undefined;
+    const record: unknown = JSON.parse(decodeURIComponent(match[1]));
+    if (!isRecord(record) || typeof record.row !== "string" || /\n|\r(?!$)/.test(record.row) || !INJECT_ROW.test(record.row.trim())) return undefined;
     const task = taskFromRow(record.row);
     return record.key === task.key ? { ...task,
       eventId: task.eventId ?? (typeof record.eventId === "string" ? record.eventId : undefined),

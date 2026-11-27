@@ -1,7 +1,7 @@
-import { Plugin, Modal, Notice, WorkspaceLeaf, TFile, TAbstractFile, MarkdownRenderChild, MarkdownView, editorInfoField } from "obsidian";
-import * as obsidianModule from "obsidian";
+import { Plugin, Modal, Notice, WorkspaceLeaf, TFile, TAbstractFile, MarkdownRenderChild, MarkdownView, getLanguage, requireApiVersion, editorInfoField } from "obsidian";
+import { isRecord } from "./model/record";
 import { setLang, t } from "./l10n/strings";
-import { sanitize, type Settings } from "./kernel/settings";
+import { resolveLang, sanitize, type Settings } from "./kernel/settings";
 import { SettingsTab } from "./kernel/settings-tab";
 import { VaultFileIO } from "./platform/io";
 import { parseMonthlyNote, blockToEvent, serializeBlock } from "./data/note-format";
@@ -39,6 +39,12 @@ type MonthActivity = {
   duplicates?: number;
 };
 
+function isMonthActivity(value: unknown): value is MonthActivity {
+  return isRecord(value) && typeof value.at === "string" && typeof value.file === "string"
+    && (value.kind === "observed" || value.kind === "saved" || value.kind === "created" || value.kind === "removed")
+    && typeof value.syncing === "boolean" && (value.duplicates === undefined || typeof value.duplicates === "number");
+}
+
 export default class MyAgendaPluginV2 extends Plugin {
   settings!: Settings;
   private io!: KeyValueFileIO;
@@ -55,8 +61,12 @@ export default class MyAgendaPluginV2 extends Plugin {
 
   async onload(): Promise<void> {
     this.settings = sanitize(await this.loadData());
-    const recent = this.app.loadLocalStorage?.("myagenda-month-activity");
-    if (Array.isArray(recent)) this.monthActivity = recent.slice(0, 120);
+    if (requireApiVersion("1.8.7")) {
+      try {
+        const recent: unknown = this.app.loadLocalStorage("myagenda-month-activity");
+        if (Array.isArray(recent)) this.monthActivity = recent.filter(isMonthActivity).slice(0, 120);
+      } catch { /* A missing or unreadable diagnostic cache must never block startup. */ }
+    }
     this.io = new VaultFileIO(this.app.vault, this.app.fileManager);
     this.storageFolder = this.settings.folder;
     this.notes = new MonthlyNoteStore(this.io, this.storageFolder, path => this.recordMonthActivity(path, "saved"));
@@ -180,20 +190,8 @@ export default class MyAgendaPluginV2 extends Plugin {
 
   private resolveLang(): "zh" | "en" {
     if (this.settings.lang !== "auto") return this.settings.lang;
-    // auto = 跟随 Obsidian 界面语言(而不是系统语言):Obsidian 界面设为英文时必须出英文。
-    // getLanguage() 是 1.9+ API,动态探测存在才用;再依次回退 localStorage 与系统语言。
-    const getLangApi = (obsidianModule as unknown as { getLanguage?: () => string }).getLanguage;
-    if (typeof getLangApi === "function") {
-      const lang = getLangApi();
-      if (lang) return lang.toLowerCase().startsWith("zh") ? "zh" : "en";
-    }
-    try {
-      const obsidianLang = window.localStorage.getItem("language");
-      if (obsidianLang) return obsidianLang.toLowerCase().startsWith("zh") ? "zh" : "en";
-    } catch {
-      /* popout 窗口无 localStorage */
-    }
-    return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+    const locale = requireApiVersion("1.8.7") ? getLanguage() : document.documentElement.lang || navigator.language;
+    return resolveLang(this.settings, locale);
   }
 
   private registerInjectionControls(): void {
@@ -258,7 +256,9 @@ export default class MyAgendaPluginV2 extends Plugin {
     const file = path.slice(path.lastIndexOf("/") + 1);
     this.monthActivity.unshift({ at, file, kind, syncing, duplicates });
     this.monthActivity.length = Math.min(this.monthActivity.length, 120);
-    try { this.app.saveLocalStorage?.("myagenda-month-activity", this.monthActivity); }
+    try {
+      if (requireApiVersion("1.8.7")) this.app.saveLocalStorage("myagenda-month-activity", this.monthActivity);
+    }
     catch { /* Diagnostics remain available in memory when local storage is full. */ }
   }
 

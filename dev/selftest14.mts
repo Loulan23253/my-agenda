@@ -12,6 +12,12 @@ for (const name of ['window', 'document', 'MutationObserver', 'HTMLElement', 'No
 (globalThis as any).getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
 (globalThis as any).requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
 (globalThis as any).cancelAnimationFrame = dom.window.cancelAnimationFrame.bind(dom.window);
+dom.window.Node.prototype.createEl = function(tag: string) {
+  const child = this.ownerDocument.createElement(tag);
+  this.appendChild(child);
+  return child;
+};
+dom.window.Node.prototype.createSpan = function() { return this.createEl('span'); };
 setLang('zh');
 (dom.window.Range.prototype as any).getClientRects = () => [];
 (dom.window.Range.prototype as any).getBoundingClientRect = () => ({ left:0,right:0,top:0,bottom:0,width:0,height:0 });

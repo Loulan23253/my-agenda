@@ -1,6 +1,6 @@
 {
   "name": "myagenda",
-  "version": "0.10.19",
+  "version": "0.10.20",
   "description": "Two-way calendar sync for Obsidian (clean-room v2 implementation)",
   "main": "main.js",
   "scripts": {
