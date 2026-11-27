@@ -156,18 +156,6 @@
 .ag2-allday-label { font-size: 0.7em; color: var(--text-muted); flex: 0 0 auto; }
 .ag2-allday .ag2-event-row { flex: 1 1 auto; margin-bottom: 0; padding: 0.35em 0.7em; }
 
-.ag2-monthhead { display: flex; }
-.ag2-monthdow { flex: 1 1 0; text-align: center; font-size: 0.68em; color: var(--text-muted); padding: 0.2em 0; }
-.ag2-monthgrid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
-.ag2-monthcell { min-width: 0; min-height: 3.6em; overflow: hidden; border-radius: 8px; padding: 0.15em; cursor: pointer; border: 1px solid transparent; }
-.ag2-monthcell:hover { background: var(--ag-tint-softer); }
-.ag2-monthcell.is-other { opacity: 0.35; }
-.ag2-monthcell.is-today { border-color: var(--ag-tint); }
-.ag2-monthday { font-size: 0.7em; color: var(--text-normal); text-align: center; border-radius: 50%; width: 1.5em; height: 1.5em; display: inline-flex; align-items: center; justify-content: center; }
-.ag2-monthday.is-selected { background: var(--ag-tint); color: #fff; font-weight: 600; }
-.ag2-monthpill { font-size: 0.62em; border-left: 2px solid; border-radius: 3px; padding: 0 0.25em; margin: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ag2-monthmore { font-size: 0.6em; color: var(--text-muted); }
-
 .ag2-stat-card { background: var(--background-primary); border-radius: 14px; padding: 0.8em 1em; box-shadow: 0 1px 1px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.04), 0 0 0 0.5px var(--ag-sep); margin-bottom: 0.8em; }
 .ag2-stat-title { font-weight: 700; font-size: 0.9em; margin-bottom: 0.5em; color: var(--text-normal); }
 .ag2-hero { display: flex; align-items: baseline; gap: 0.8em; padding: 0.1em 0 0.5em; }
@@ -257,9 +245,6 @@
 .ag2-todayprogress { position: relative; height: 6px; border-radius: 999px; background: var(--ag-fill); overflow: hidden; margin: 0.15em 0 0.6em; }
 .ag2-todayprogress-fill { height: 100%; border-radius: 999px; background: var(--ag-tint); transition: width 0.3s ease; }
 .ag2-todayprogress-label { position: absolute; right: 0.4em; top: -1.1em; font-size: 0.66em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.ag2-monthcell:not(.ag2-month-open) .ag2-monthpill.is-extra { display: none; }
-.ag2-monthmore { font-size: 0.62em; color: var(--text-muted); cursor: pointer; padding: 0 0.25em; border-radius: 4px; }
-.ag2-monthmore:hover { color: var(--ag-tint); background: var(--ag-tint-softer); }
 .ag2-create-drag { position: absolute; left: 2px; right: 4px; z-index: 2; pointer-events: none; background: color-mix(in srgb, var(--ag-tint) 22%, transparent); border: 1.5px dashed var(--ag-tint); border-radius: 7px; font-size: 0.62em; font-weight: 600; color: var(--ag-tint); display: flex; align-items: center; justify-content: center; }
 .ag2-conflict-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6em; }
 .ag2-conflict-cols .ag2-conflict-row { border-top: 3px solid var(--col-c, var(--ag-tint)); border-radius: 10px; margin: 0; }
@@ -350,25 +335,147 @@
 .ag2-grid-colhead.is-wd-5 { color: #f59e0b; }
 .ag2-grid-colhead.is-wd-6 { color: #6366f1; }
 
-/* ---- 月视图:圆角卡片单元格 + 左上角日期 + 事件条 ---- */
-.ag2-monthgrid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: 4px; height: 100%; }
-.ag2-monthcell { min-height: 4.2em; border-radius: 10px; padding: 0.3em 0.4em; background: var(--background-primary); box-shadow: 0 0 0 0.5px var(--ag-sep); display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
-.ag2-monthcell.is-other { background: transparent; box-shadow: none; }
-.ag2-monthcell.is-other .ag2-monthday { color: var(--text-faint); }
-.ag2-monthcell.is-today { box-shadow: 0 0 0 1.5px var(--ag-tint); }
-.ag2-monthday { font-size: 0.78em; color: var(--text-normal); text-align: left; }
-.ag2-monthcell.is-today .ag2-monthday { color: var(--ag-tint); font-weight: 700; }
-.ag2-monthpill { font-size: 0.68em; background: var(--ag-fill); border-left: 2.5px solid var(--pill-c, var(--ag-tint)); border-radius: 5px; padding: 0.1em 0.4em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-normal); cursor: pointer; }
-.ag2-monthpill:hover { background: var(--ag-tint-softer); }
-.ag2-monthmore { font-size: 0.62em; color: var(--text-muted); }
+/* 月历：用留白分列、横线分周，短色标标识日程分类。 */
+.ag2-panel:has(.ag2-monthgrid) {
+  --month-sheet: var(--background-primary);
+  --month-rule: color-mix(in srgb, var(--text-normal) 11%, transparent);
+  --month-wash: color-mix(in srgb, var(--text-normal) 4%, transparent);
+  --month-gutter: clamp(3px, .7cqw, 9px);
+}
+.ag2-panel:has(.ag2-monthgrid) .ag2-head { margin: 0; padding: .65em 0 .45em; border: 0; }
+.ag2-panel:has(.ag2-monthgrid) .ag2-titlebar { flex-wrap: wrap; gap: .35em; }
+.ag2-panel:has(.ag2-monthgrid) .ag2-largetitle { order: -1; display: flex; align-items: baseline; gap: .48em; margin: 0 .3em 0 0; font: inherit; }
+.ag2-month-name { font-size: clamp(1.45rem, 3.8cqw, 2.25rem); font-weight: 650; letter-spacing: -.04em; line-height: 1.18; }
+.ag2-month-year { font-size: .8em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.ag2-panel:has(.ag2-monthgrid) .ag2-tb-arrow { padding: .12em .35em; }
+.ag2-panel:has(.ag2-monthgrid) :is(.ag2-navtoday-btn, .ag2-syncbtn) {
+  border-radius: 6px; background: transparent; color: var(--text-muted); font-weight: 500;
+}
+.ag2-panel:has(.ag2-monthgrid) :is(.ag2-navtoday-btn, .ag2-syncbtn):hover { background: var(--month-wash); color: var(--text-normal); }
+.ag2-panel:has(.ag2-monthgrid) .ag2-fab { border-radius: 7px; box-shadow: none; }
+.ag2-panel:has(.ag2-monthgrid) .ag2-filter { align-items: center; gap: .25em; padding-bottom: .6em; }
+.ag2-panel:has(.ag2-monthgrid) .ag2-chip {
+  display: inline-flex; align-items: center; gap: .42em; padding: .2em .6em; border-radius: 6px;
+  font-size: .75em; font-weight: 500; background: transparent; color: var(--text-normal);
+}
+.ag2-panel:has(.ag2-monthgrid) .ag2-chip:not(:first-child)::before {
+  content: ""; width: .5em; height: .5em; border-radius: 50%; background: var(--ag-category);
+}
+.ag2-panel:has(.ag2-monthgrid) .ag2-chip.off { opacity: .6; box-shadow: none; }
+.ag2-panel:has(.ag2-monthgrid) .ag2-chip:first-child.off,
+.ag2-panel:has(.ag2-monthgrid) .ag2-chip:hover { background: var(--month-wash); opacity: 1; }
+.ag2-panel:has(.ag2-monthgrid) .ag2-chip.off:not(:first-child)::before {
+  background: transparent; box-shadow: inset 0 0 0 1px var(--text-muted);
+}
+.ag2-monthhead, .ag2-monthgrid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.ag2-monthhead {
+  position: sticky; top: 0; z-index: 1; padding-block: .48em; background: var(--month-sheet);
+  border-bottom: 1px solid var(--month-rule);
+}
+.ag2-monthdow { padding-inline-start: calc(var(--month-gutter) + 3px); color: var(--text-muted); font-size: .7em; font-weight: 500; }
+.ag2-monthgrid { padding-block-end: .4em; }
+.ag2-monthcell {
+  --month-event-size: clamp(11px, .76em, 16px);
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  /* The title line and its vertical padding total 1.66 times the event font size. */
+  grid-template-rows: auto repeat(3, calc(1.66 * var(--month-event-size)));
+  align-content: start; row-gap: 2px; min-width: 0; border-top: 1px solid transparent;
+  padding: .48em var(--month-gutter) .55em; cursor: pointer;
+}
+.ag2-monthcell > * { grid-column: 1 / -1; }
+.ag2-monthcell:nth-child(n + 8) { border-top-color: var(--month-rule); }
+.ag2-monthcell.is-weekend .ag2-monthday { color: var(--text-muted); }
+.ag2-monthcell:hover { background: var(--month-wash); }
+.ag2-monthday {
+  align-self: flex-start; display: grid; place-items: center; min-width: 1.6em; height: 1.6em;
+  margin-bottom: .12em; border-radius: 50%; font-variant-numeric: tabular-nums; font-size: .83em;
+  font-weight: 600; line-height: 1; color: var(--text-normal);
+}
+.ag2-monthstamp { display: flex; align-items: center; column-gap: .12em; }
+.ag2-monthmark {
+  font-size: .65em; font-weight: 650; color: var(--text-normal); white-space: nowrap;
+}
+.ag2-monthcell.is-other { background: color-mix(in srgb, var(--text-normal) 7%, transparent); }
+/* Let the adjacent-month wash taper at the join, keeping the whole date clickable. */
+.ag2-monthgrid {
+  --month-edge-width: clamp(7px, 1.7cqw, 16px);
+  --month-edge-ink: color-mix(in srgb, var(--ag-tint) 35%, var(--month-rule));
+}
+.ag2-monthcell.is-other:has(+ .ag2-monthcell:not(.is-other)):not(:nth-child(7n)) {
+  position: relative;
+  border-start-end-radius: var(--month-edge-width) 70%;
+  border-end-end-radius: 3px 30%;
+}
+.ag2-monthcell:not(.is-other) + .ag2-monthcell.is-other:not(:nth-child(7n + 1)) {
+  position: relative;
+  border-start-start-radius: 3px 30%;
+  border-end-start-radius: var(--month-edge-width) 70%;
+}
+.ag2-monthcell.is-other:has(+ .ag2-monthcell:not(.is-other)):not(:nth-child(7n))::after,
+.ag2-monthcell:not(.is-other) + .ag2-monthcell.is-other:not(:nth-child(7n + 1))::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  mask-image: linear-gradient(transparent, black 30%, black 70%, transparent);
+}
+.ag2-monthcell.is-other:has(+ .ag2-monthcell:not(.is-other)):not(:nth-child(7n))::after {
+  border-inline-end: 1px solid var(--month-edge-ink);
+}
+.ag2-monthcell:not(.is-other) + .ag2-monthcell.is-other:not(:nth-child(7n + 1))::after {
+  border-inline-start: 1px solid var(--month-edge-ink);
+}
+/* When the month changes between rows, put the curve above the month label. */
+.ag2-monthcell:nth-child(7n + 1):has(.ag2-monthmark):not(:first-child) {
+  position: relative;
+}
+.ag2-monthcell:nth-child(7n + 1):has(.ag2-monthmark):not(:first-child)::after {
+  content: ""; position: absolute; inset-block-start: -1px; inset-inline-start: var(--month-gutter);
+  width: min(72%, 4em); height: .27em; border-block-start: 2px solid var(--month-edge-ink);
+  border-radius: 50%; transform: rotate(-2deg); pointer-events: none;
+}
+.ag2-monthcell.is-other :is(.ag2-monthday, .ag2-monthmark, .ag2-monthpill) { color: var(--text-muted); }
+.ag2-monthcell.is-other .ag2-monthday { font-weight: 400; }
+.ag2-monthcell.is-other .ag2-monthpill::before { opacity: .58; }
+.ag2-monthcell.is-other .ag2-monthpill:hover { color: var(--text-normal); }
+.ag2-monthday.is-selected { box-shadow: inset 0 0 0 1px var(--text-muted); }
+.ag2-monthcell.is-today .ag2-monthday {
+  position: relative; isolation: isolate; color: var(--text-normal); box-shadow: none;
+}
+.ag2-monthcell.is-today .ag2-monthday::before {
+  content: ""; position: absolute; inset: -1px -3px; z-index: -1; pointer-events: none;
+  border: 1.5px solid var(--ag-tint); border-radius: 49% 58% 45% 53%;
+  background: var(--ag-tint-soft); transform: rotate(-7deg);
+}
+.ag2-monthpill {
+  position: relative; min-width: 0; border-radius: .4em; padding: .08em .15em .08em .86em;
+  color: var(--text-normal); font-size: var(--month-event-size); font-weight: 450; line-height: 1.5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ag2-monthpill::before {
+  content: ""; position: absolute; inset-inline-start: .1em; top: 50%;
+  width: .5em; height: .22em; border-radius: 90% 35% 80% 45%;
+  background: var(--pill-c); transform: translateY(-50%) rotate(-10deg); pointer-events: none;
+}
+.ag2-monthpill:hover { background: color-mix(in srgb, var(--pill-c) 14%, transparent); }
+.ag2-monthcell:not(.ag2-month-open) .ag2-monthpill.is-extra { display: none; }
+/* Share the third slot with the overflow control until this day is expanded. */
+.ag2-monthcell:not(.ag2-month-open):has(> .ag2-monthmore) > .ag2-monthpill:nth-child(4) {
+  grid-area: 4 / 1;
+}
+.ag2-monthcell:not(.ag2-month-open) > .ag2-monthmore { grid-area: 4 / 2; align-self: center; }
+.ag2-monthmore { justify-self: start; padding: .12em .45em; color: var(--text-muted); font-size: .68em; cursor: pointer; }
+.ag2-monthmore:hover { color: var(--text-normal); }
+.ag2-monthpill[draggable="true"] { cursor: grab; }
+.ag2-monthpill.is-dragging { opacity: .5; }
+.ag2-monthcell.ag2-month-drop { background: var(--ag-tint-soft); box-shadow: inset 0 0 0 2px var(--ag-tint); }
+@container (max-width: 480px) {
+  .ag2-monthcell { --month-event-size: clamp(10px, 2.65cqw, 12px); padding-inline: 2px; }
+  .ag2-monthpill { padding-inline: .77em .08em; }
+  .ag2-monthday { font-size: .8em; }
+  .ag2-monthmark { font-size: min(.65em, 2.8cqw); }
+  .ag2-monthmark + .ag2-monthday { min-width: 0; }
+}
 
 .ag2-navtoday-btn { cursor: pointer; padding: 0.2em 0.75em; border-radius: 999px; background: var(--ag-tint-soft); color: var(--ag-tint); font-size: 0.82em; font-weight: 600; transition: background 0.15s ease, color 0.15s ease; }
 .ag2-navtoday-btn:hover { background: var(--ag-tint); color: #fff; }
-
-/* ---- 月视图拖拽 ---- */
-.ag2-monthpill[draggable="true"] { cursor: grab; }
-.ag2-monthpill.is-dragging { opacity: 0.4; }
-.ag2-monthcell.ag2-month-drop { background: var(--ag-tint-softer); box-shadow: inset 0 0 0 1.5px var(--ag-tint); }
 
 /* 日记中的跳过/恢复按钮：只在界面显示，不写进 Markdown。 */
 button.ag2-inject-action {
@@ -387,3 +494,82 @@ button.ag2-inject-action:hover, button.ag2-inject-action:focus-visible {
   margin: 0.3em 0.5em; color: var(--text-muted); font-size: 0.85em;
 }
 body.is-mobile button.ag2-inject-action { min-height: 32px; padding: 0.25em 0.65em; }
+
+/* Event editor only. Other dialogs share the form primitives above. */
+.modal.ag2-event-editor {
+  --editor-line: var(--background-modifier-border);
+  --editor-surface: var(--background-secondary);
+  --editor-focus: var(--interactive-accent);
+  width: min(32rem, 100%); max-width: 100%; box-sizing: border-box;
+  padding: clamp(14px, 3vw, 24px);
+}
+.ag2-event-editor .modal-title { font-size: .9rem; color: var(--text-muted); font-weight: 550; }
+.ag2-event-editor .modal-content { width: 100%; max-width: none; min-width: 0; padding: 0; }
+.ag2-event-editor input.ag2-f-title {
+  height: auto; padding: .25em 0 .52em; margin: 0 0 .45em; border: 0;
+  border-bottom: 1px solid var(--editor-line); border-radius: 0; background: transparent;
+  box-shadow: none; font-size: 1.5rem; font-weight: 600; line-height: 1.35;
+}
+.ag2-event-editor .ag2-card { border-radius: 12px; margin: 0; padding: 0; background: transparent; }
+.ag2-event-editor .ag2-editor-time { padding: .3em .8em; background: var(--editor-surface); }
+.ag2-event-editor .ag2-editor-details { padding: .42em .8em .25em; }
+.ag2-event-editor .ag2-row {
+  display: grid; grid-template-columns: 4.5em minmax(0, 1fr); align-items: baseline;
+  gap: .6em; padding: .32em 0; min-height: 0; border: 0;
+}
+.ag2-event-editor .ag2-row-label { color: var(--text-muted); white-space: nowrap; font-size: .84em; }
+.ag2-event-editor .ag2-row-ctrl { min-width: 0; justify-content: start; flex-wrap: wrap; }
+.ag2-event-editor .ag2-editor-time .ag2-row:first-child { align-items: center; border-bottom: 1px solid var(--editor-line); margin-bottom: .25em; padding-bottom: .48em; }
+.ag2-event-editor .ag2-editor-time .ag2-row:first-child .ag2-row-ctrl { justify-content: end; }
+.ag2-event-editor :is(input.ag2-f-dt,select.ag2-f-sel,.ag2-f-note) {
+  box-sizing: border-box; width: 100%; min-width: 0; height: auto; min-height: 2.15em;
+  padding: .32em .6em; font: inherit; font-size: .89em; text-align: start;
+  color: var(--text-normal); background-color: var(--background-primary);
+  border: 1px solid var(--editor-line); border-radius: 7px; box-shadow: none;
+}
+.ag2-event-editor select.ag2-f-sel { padding-inline-end: 1.8em; }
+.ag2-event-editor .ag2-f-note { min-height: 3em; max-height: 9em; }
+.ag2-event-editor input.ag2-f-title:focus {
+  outline: none !important;
+  box-shadow: none !important;
+  border-color: var(--editor-line);
+}
+.ag2-event-editor :is(.ag2-f-dt,.ag2-f-sel,.ag2-f-note,.ag2-chipbtn,.ag2-btn,.ag2-switch):focus-visible {
+  outline: 2px solid var(--editor-focus); outline-offset: 1px;
+}
+.ag2-event-editor .ag2-editor-reminder { gap: .2em; }
+.ag2-event-editor .ag2-editor-hint { width: 100%; color: var(--text-muted); font-size: .75em; line-height: 1.4; }
+.ag2-event-editor .ag2-chips { justify-content: start; gap: .32em; }
+.ag2-event-editor button.ag2-chipbtn {
+  display: inline-flex; align-items: center; gap: .4em; min-width: 0; max-width: 100%;
+  height: auto; min-height: 1.95em; padding: .18em .65em; border: 1px solid var(--editor-line);
+  background: transparent; box-shadow: none; font-size: .82em; color: var(--text-muted); overflow-wrap: anywhere;
+}
+.ag2-event-editor button.ag2-chipbtn::before { content: ""; width: .52em; height: .52em; flex: none; border-radius: 50%; background: var(--category-color); }
+.ag2-event-editor button.ag2-chipbtn.is-on {
+  border-color: var(--category-color); color: var(--text-normal);
+  background: color-mix(in srgb, var(--category-color) 14%, var(--background-primary));
+}
+.ag2-event-editor input.ag2-switch {
+  appearance: none; position: relative; width: 2.1em; height: 1.25em; margin: 0; padding: 0;
+  background: var(--background-modifier-border-hover, var(--editor-line)); border: 1px solid var(--editor-line);
+  border-radius: 1em; cursor: pointer;
+}
+.ag2-event-editor input.ag2-switch:checked { background: var(--interactive-accent); }
+.ag2-event-editor input.ag2-switch::after {
+  content: ""; position: absolute; top: 50%; left: 2px; width: .86em; height: .86em;
+  transform: translateY(-50%); border-radius: 50%; background: var(--text-muted); mask: none;
+}
+.ag2-event-editor input.ag2-switch:checked::after { left: auto; right: 2px; background: var(--text-on-accent); }
+.ag2-event-editor .ag2-editor-footer {
+  position: sticky; bottom: 0; display: flex; justify-content: flex-end; align-items: center; gap: .45em;
+  margin-top: .45em; padding: .65em 0 .15em; border-top: 1px solid var(--editor-line); background: var(--background-primary);
+}
+.ag2-event-editor .ag2-editor-footer button { min-height: 2.2em; padding: .28em 1em; border: 0; border-radius: 7px; box-shadow: none; }
+.ag2-event-editor .ag2-editor-footer .ag2-btn-ghost { background: transparent; color: var(--text-muted); }
+.ag2-event-editor .ag2-editor-footer .ag2-danger { order: -1; margin: 0 auto 0 0; color: var(--text-error); }
+.ag2-event-editor .ag2-editor-footer .ag2-btn-primary { background: var(--interactive-accent); color: var(--text-on-accent); }
+@media (max-width: 420px) {
+  .ag2-event-editor .ag2-row { grid-template-columns: 4em minmax(0, 1fr); gap: .35em; }
+  .ag2-event-editor .ag2-editor-details { padding-inline: .35em; }
+}

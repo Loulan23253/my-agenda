@@ -82,10 +82,6 @@ function describe(ev: CalendarEvent): string {
   return `${ev.startsAt.replace("T", " ").slice(0, 16)} ${ev.title}`;
 }
 
-function monthKey(startsAt: string): string {
-  return startsAt.slice(0, 7);
-}
-
 function firstHeader(headers: Record<string, string>, name: string): string | undefined {
   const hit = Object.entries(headers).find(([k]) => k.toLowerCase() === name.toLowerCase());
   return hit?.[1];
@@ -198,7 +194,7 @@ export class SyncEngine {
     const { deps } = this;
     const summary: SyncSummary = { pulled: 0, pushed: 0, created: 0, deleted: 0, conflicts: 0, adopted: 0, failed: 0, unmapped: 0, months: [] };
     const read = await deps.notes.loadAll();
-    const local = read.events;
+    const local = [...read.events];
     const loadedIds = new Set(local.map(event => event.id));
     const forceFull = new Set(Object.entries(deps.journal.events)
       .filter(([id, entry]) => entry.state !== "pendingDelete" && !loadedIds.has(id))
@@ -394,7 +390,7 @@ export class SyncEngine {
 
     // 服务器已删除的事件:本地块真正移除(否则下轮无账本会被当新增复活)
     if (dropLocally.size) {
-      await deps.notes.removeByUids(dropLocally);
+      await deps.notes.removeByUids(dropLocally, read.originals);
       for (let i = local.length - 1; i >= 0; i--) if (dropLocally.has(local[i].id)) local.splice(i, 1);
       for (const id of dropLocally) localIds.delete(id);
     }
@@ -413,20 +409,7 @@ export class SyncEngine {
       }
     }
     if (toApply.length) {
-      const applied = new Map(toApply.map((x) => [x.id, x]));
-      const merged = local.map((e) => applied.get(e.id) ?? e);
-      for (const [id, ev] of applied) if (!local.some((e) => e.id === id)) merged.push(ev);
-      const affected = new Set<string>();
-      for (const [id, ev] of applied) {
-        affected.add(monthKey(ev.startsAt));
-        const old = local.find((e) => e.id === id);
-        if (old) affected.add(monthKey(old.startsAt));
-      }
-      for (const month of affected) {
-        const preamble = await deps.notes.readMonthPreamble(month);
-        await deps.notes.writeMonth(month, merged, preamble);
-        summary.months.push(month);
-      }
+      summary.months.push(...await deps.notes.saveChanges(toApply, read));
     }
 
     // ⑤ PUBLISH:推回 + 删除(带节奏与 503 重试;单个失败不中断)
@@ -490,10 +473,7 @@ export class SyncEngine {
             if (!pick) { deferredCalendars.add(job.route.id); continue; }
             if (pick === "theirs" && remoteEv) {
               const loaded = await deps.notes.loadAll();
-              const merged = loaded.events.map((e) => (e.id === remoteEv.id ? remoteEv : e));
-              if (!merged.some((e) => e.id === remoteEv.id)) merged.push(remoteEv);
-              const month = monthKey(remoteEv.startsAt);
-              await deps.notes.writeMonth(month, merged, await deps.notes.readMonthPreamble(month));
+              await deps.notes.saveChanges([remoteEv], loaded);
               journalPut(deps.journal, job.ev.id, {
                 calendarId: job.route.id,
                 href: url,

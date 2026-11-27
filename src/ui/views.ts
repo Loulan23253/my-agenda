@@ -163,6 +163,16 @@ export function renderWeekView(container: HTMLElement, events: CalendarEvent[], 
   });
 }
 
+/** Pick the higher-contrast foreground for the calendar's configured sRGB color. */
+function monthLabelInk(color: string): string {
+  const linear = (at: number): number => {
+    const v = parseInt(color.slice(at, at + 2), 16) / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * linear(1) + 0.7152 * linear(3) + 0.0722 * linear(5);
+  return (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? "#000" : "#fff";
+}
+
 /** ④ 月视图:六行七列网格,事件以小条呈现。 */
 export function renderMonthView(container: HTMLElement, events: CalendarEvent[], deps: ViewDeps): void {
   const a = deps.anchor;
@@ -181,18 +191,26 @@ export function renderMonthView(container: HTMLElement, events: CalendarEvent[],
     list.push(o);
     byDay.set(k, list);
   }
+  const monthLabel = new Intl.DateTimeFormat(getLang(), { month: "short" });
   for (let i = 0; i < 42; i++) {
     const day = addDays(gridStart, i);
     const cell = grid.createDiv({ cls: "ag2-monthcell" });
+    if (day.getDay() === 0 || day.getDay() === 6) cell.addClass("is-weekend");
     if (day.getMonth() !== a.getMonth()) cell.addClass("is-other");
     if (key(day) === key(deps.today)) cell.addClass("is-today");
-    const num = cell.createDiv({ cls: "ag2-monthday", text: String(day.getDate()) });
+    const stamp = cell.createDiv({ cls: "ag2-monthstamp" });
+    if (i === 0 || day.getDate() === 1) {
+      stamp.createEl("span", { cls: "ag2-monthmark", text: monthLabel.format(day) });
+    }
+    const num = stamp.createDiv({ cls: "ag2-monthday", text: String(day.getDate()) });
     if (key(day) === key(deps.anchor)) num.addClass("is-selected");
     const list = byDay.get(key(day)) ?? [];
     for (const [idx, o] of list.entries()) {
       const pill = cell.createDiv({ cls: "ag2-monthpill" });
-      // 配色走 CSS 变量:--pill-c 驱动胶囊左边框/背景(styles.css .ag2-monthpill)
-      pill.style.setProperty("--pill-c", categoryColor(o.event.category ?? ""));
+      const color = categoryColor(o.event.category);
+      pill.style.setProperty("--pill-c", color);
+      pill.style.setProperty("--pill-ink", monthLabelInk(color));
+      pill.title = o.event.title;
       // HTML5 拖拽:胶囊可拖,uid 随 dataTransfer 传递;格子侧 dragover/drop 接收
       if (idx >= 3) pill.addClass("is-extra");
       pill.draggable = true;
@@ -206,7 +224,7 @@ export function renderMonthView(container: HTMLElement, events: CalendarEvent[],
         pill.classList.add("is-dragging");
       });
       pill.addEventListener("dragend", () => pill.classList.remove("is-dragging"));
-      pill.textContent = o.event.isAllDay ? o.event.title : `${hhmm(o.start)} ${o.event.title}`;
+      pill.textContent = o.event.title;
       pill.addEventListener("click", (e) => {
         e.stopPropagation(); // 不能冒泡到空白格的“新建”处理
         deps.onOpen(o);

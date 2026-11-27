@@ -154,6 +154,8 @@ export class SettingsTab extends PluginSettingTab {
         });
       });
 
+    this.renderMonthActivity(new Setting(containerEl));
+
     new Setting(containerEl)
       .setName(t("settings.conflictPolicy"))
       .addDropdown((d) => {
@@ -338,6 +340,12 @@ export class SettingsTab extends PluginSettingTab {
 
   // —— 1.13+ 声明式设置:注册进设置搜索;1.12 及以下仍走 display()。 ——
 
+  private renderMonthActivity(setting: Setting): void {
+    setting.setName(t("months.title")).addButton(b =>
+      b.setButtonText(t("months.open")).onClick(() => this.plugin.openMonthActivity())
+    );
+  }
+
   private groupOf(heading: string, items: SettingGroupItem[]): SettingDefinitionGroup {
     return { type: "group", heading, items };
   }
@@ -392,6 +400,7 @@ export class SettingsTab extends PluginSettingTab {
           control: { type: "text", key: "icsUrl" },
         },
         { name: t("settings.autoSync"), control: { type: "dropdown", key: "autoSyncMinutes", options: Object.fromEntries([0, 5, 15, 30, 60].map((v) => [String(v), v === 0 ? t("settings.autoSync.off") : `${v} min`])) } },
+        { name: t("months.title"), render: (setting: Setting) => this.renderMonthActivity(setting) },
         { name: t("settings.conflictPolicy"), control: { type: "dropdown", key: "conflictPolicy", options: { ask: t("settings.conflictPolicy.ask"), server: t("settings.conflictPolicy.server") } } },
       ]),
       this.groupOf(t("settings.section.appearance"), [

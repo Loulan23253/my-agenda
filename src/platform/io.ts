@@ -31,6 +31,36 @@ export class VaultFileIO implements KeyValueFileIO {
     }
   }
 
+  async updateText(path: string, edit: (current: string | null) => string | null): Promise<void> {
+    const p = normalizePath(path);
+    const unchanged = new Error("unchanged");
+    const apply = (current: string): string => {
+      const next = edit(current);
+      if (next === null || next === current) throw unchanged;
+      return next;
+    };
+    const processExisting = async (): Promise<boolean> => {
+      const file = this.vault.getAbstractFileByPath(p);
+      try {
+        if (file instanceof TFile) await this.vault.process(file, apply);
+        else if (await this.vault.adapter.exists(p)) await this.vault.adapter.process(p, apply);
+        else return false;
+      } catch (error) {
+        if (error !== unchanged) throw error;
+      }
+      return true;
+    };
+    if (await processExisting()) return;
+    const initial = edit(null);
+    if (initial === null) return;
+    try {
+      await this.vault.create(p, initial);
+    } catch (error) {
+      // A file created concurrently must be merged, never overwritten via adapter.write.
+      if (!await processExisting()) throw error;
+    }
+  }
+
   async remove(path: string): Promise<void> {
     const p = normalizePath(path);
     const f = this.vault.getAbstractFileByPath(p);

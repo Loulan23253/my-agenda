@@ -2,6 +2,7 @@ import { App, Modal, Notice } from "obsidian";
 import { t, getLang } from "../l10n/strings";
 import type { CalendarEvent } from "../model/event";
 import type { DiscoveredCalendar } from "../sync/dav";
+import { categoryColor } from "./palette";
 import { toLocalIso } from "../kernel/dates";
 
 /** 冲突裁决弹窗。 */
@@ -154,7 +155,8 @@ export function openEventEditor(
   defaultEndHHMM?: string,
 ): void {
   const modal = new Modal(app);
-  modal.modalEl.addClass("ag2-modal");
+  modal.modalEl.addClass("ag2-modal", "ag2-event-editor");
+  modal.setTitle(t(existing ? "editor.titleEdit" : "editor.titleNew"));
   const content = modal.contentEl;
   const ev: CalendarEvent = existing ?? {
     id: crypto.randomUUID() + "@myagenda",
@@ -171,6 +173,7 @@ export function openEventEditor(
 
   // 大标题输入(Apple 式:无边框、加粗、置顶)
   const titleInput = content.createEl("input", { cls: "ag2-f-title", placeholder: t("editor.field.title") });
+  titleInput.setAttr("aria-label", t("editor.field.title"));
   titleInput.value = ev.title;
 
   const addRow = (card: HTMLElement, label: string): HTMLElement => {
@@ -180,27 +183,38 @@ export function openEventEditor(
   };
 
   // 卡片一:时间
-  const cardTime = content.createDiv({ cls: "ag2-card" });
+  const cardTime = content.createDiv({ cls: "ag2-card ag2-editor-time" });
   const rowsTime = cardTime.createDiv({ cls: "ag2-card-rows" });
 
   const alldayCtrl = addRow(rowsTime, t("editor.field.allday"));
   const allday = alldayCtrl.createEl("input", { type: "checkbox", cls: "ag2-switch" });
+  allday.setAttr("aria-label", t("editor.field.allday"));
   allday.checked = ev.isAllDay;
 
   const startCtrl = addRow(rowsTime, t("editor.field.start"));
   const startInput = startCtrl.createEl("input", { type: ev.isAllDay ? "date" : "datetime-local", cls: "ag2-f-dt" });
+  startInput.setAttr("aria-label", t("editor.field.start"));
   startInput.value = ev.isAllDay ? ev.startsAt.slice(0, 10) : ev.startsAt.slice(0, 16);
 
   const endCtrl = addRow(rowsTime, t("editor.field.end"));
   const endInput = endCtrl.createEl("input", { type: ev.isAllDay ? "date" : "datetime-local", cls: "ag2-f-dt" });
+  endInput.setAttr("aria-label", t("editor.field.end"));
   endInput.value = ev.endsAt ? (ev.isAllDay ? ev.endsAt.slice(0, 10) : ev.endsAt.slice(0, 16)) : "";
 
+  let startClock = startInput.value.slice(11) || defaultStartHHMM || "09:00";
+  let endClock = endInput.value.slice(11) || defaultEndHHMM || addMinutesHHMM(startClock, 60);
   const syncTypes = () => {
+    const start = startInput.value;
+    const end = endInput.value;
+    if (allday.checked) {
+      startClock = start.slice(11) || startClock;
+      endClock = end.slice(11) || endClock;
+    }
     const type = allday.checked ? "date" : "datetime-local";
     startInput.type = type;
     endInput.type = type;
-    startInput.value = allday.checked ? startInput.value.slice(0, 10) : startInput.value.slice(0, 16);
-    if (endInput.value) endInput.value = allday.checked ? endInput.value.slice(0, 10) : endInput.value.slice(0, 16);
+    startInput.value = allday.checked || !start ? start.slice(0, 10) : start + "T" + startClock;
+    endInput.value = allday.checked || !end ? end.slice(0, 10) : end + "T" + endClock;
   };
   allday.addEventListener("change", syncTypes);
   // Apple 行为:改动开始时间后,结束时间空着或早于开始时自动顺延一小时
@@ -215,8 +229,10 @@ export function openEventEditor(
       : `${base.getFullYear()}-${p2(base.getMonth() + 1)}-${p2(base.getDate())}T${p2(base.getHours())}:${p2(base.getMinutes())}`;
   });
 
-  const repeatCtrl = addRow(rowsTime, t("editor.field.repeat"));
+  const details = content.createDiv({ cls: "ag2-card ag2-card-rows ag2-editor-details" });
+  const repeatCtrl = addRow(details, t("editor.field.repeat"));
   const repeatSel = repeatCtrl.createEl("select", { cls: "ag2-f-sel" });
+  repeatSel.setAttr("aria-label", t("editor.field.repeat"));
   const startDate = new Date(ev.startsAt);
   for (const p of REPEAT_PRESETS) repeatSel.createEl("option", { value: p.key, text: t(p.labelKey) });
   repeatSel.createEl("option", { value: "custom", text: t("editor.repeat.custom") });
@@ -227,6 +243,7 @@ export function openEventEditor(
   };
   repeatSel.value = presetOf(ev.repeats?.rule);
   const repeatInput = repeatCtrl.createEl("input", { cls: "ag2-f-dt", placeholder: "FREQ=WEEKLY" });
+  repeatInput.setAttr("aria-label", t("editor.repeat.custom"));
   repeatInput.value = ev.repeats?.rule ?? "";
   repeatInput.style.display = repeatSel.value === "custom" ? "" : "none";
   repeatSel.addEventListener("change", () => {
@@ -237,8 +254,9 @@ export function openEventEditor(
     }
   });
 
-  const statusCtrl = addRow(rowsTime, t("editor.field.status"));
+  const statusCtrl = addRow(details, t("editor.field.status"));
   const statusSel = statusCtrl.createEl("select", { cls: "ag2-f-sel" });
+  statusSel.setAttr("aria-label", t("editor.field.status"));
   for (const [v, labelKey] of [
     ["", "status.confirmed"],
     ["tentative", "status.tentative"],
@@ -248,19 +266,25 @@ export function openEventEditor(
   }
   statusSel.value = ev.status ?? "";
 
-  const remindCtrl = addRow(rowsTime, t("editor.field.reminder"));
+  const remindCtrl = addRow(details, t("editor.field.reminder"));
   const remindInput = remindCtrl.createEl("input", { cls: "ag2-f-dt" });
+  remindInput.setAttr("aria-label", t("editor.field.reminder"));
+  remindCtrl.addClass("ag2-editor-reminder");
+  const hint = remindCtrl.createDiv({ cls: "ag2-editor-hint", text: t("editor.reminderHint") });
+  hint.id = "ag2-reminder-" + crypto.randomUUID();
+  remindInput.setAttr("aria-describedby", hint.id);
   remindInput.value = (ev.reminderMinutes ?? []).join(", ");
 
   // 卡片二:分类(预设胶囊单选)
-  const cardCat = content.createDiv({ cls: "ag2-card" });
-  const catRow = addRow(cardCat, t("editor.field.category"));
+  const catRow = addRow(details, t("editor.field.category"));
   const catChips = catRow.createDiv({ cls: "ag2-chips" });
   let catValue = ev.category ?? "";
   const renderChips = (): void => {
     catChips.empty();
     for (const c of defaults.categories?.length ? defaults.categories : presetCategories()) {
       const chip = catChips.createEl("button", { cls: "ag2-chipbtn" + (catValue === c ? " is-on" : ""), text: c });
+      chip.style.setProperty("--category-color", categoryColor(c));
+      chip.setAttr("aria-pressed", String(catValue === c));
       chip.addEventListener("click", () => {
         catValue = catValue === c ? "" : c;
         renderChips();
@@ -270,19 +294,19 @@ export function openEventEditor(
   renderChips();
 
   // 卡片三:地点
-  const cardPlace = content.createDiv({ cls: "ag2-card" });
-  const placeCtrl = addRow(cardPlace, t("editor.field.place"));
+  const placeCtrl = addRow(details, t("editor.field.place"));
   const placeInput = placeCtrl.createEl("input", { cls: "ag2-f-dt ag2-f-wide" });
+  placeInput.setAttr("aria-label", t("editor.field.place"));
   placeInput.value = ev.place ?? "";
 
   // 卡片四:备注
-  const cardNotes = content.createDiv({ cls: "ag2-card" });
+  const noteCtrl = addRow(details, t("editor.field.notes"));
   // 备注用 contenteditable 纯文本块:高度天然随内容,不受主题对 textarea 的高度规则影响
-  const notesInput = cardNotes.createDiv({ cls: "ag2-f-note ag2-f-note-ed" });
+  const notesInput = noteCtrl.createDiv({ cls: "ag2-f-note ag2-f-note-ed" });
   notesInput.setAttr("contenteditable", "plaintext-only");
   notesInput.setAttr("role", "textbox");
   notesInput.setAttr("aria-label", t("editor.field.notes"));
-  notesInput.setAttr("data-placeholder", t("editor.field.notes"));
+  notesInput.setAttr("aria-multiline", "true");
   notesInput.setText(ev.notes ?? "");
   notesInput.toggleClass("is-empty", !(ev.notes ?? "").trim());
   notesInput.addEventListener("input", () => {

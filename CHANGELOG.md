@@ -1,5 +1,21 @@
 # 更新记录
 
+## 0.10.19 — 2026-11-27
+
+### 中文
+
+- 月视图每周默认预留三条日程的高度。标题保持单行，更多日程可在当天展开。跨月日期用淡底和月份标记区分，交界处使用弧线。
+- 更新新建和编辑日程窗口。起止时间对齐，分类沿用日历配色，提醒说明放在输入框下方，保存按钮移到右下角。输入标题时去除蓝色外框。
+- 切换“全天”后再切回定时日程，会恢复原来的起止时刻。
+- 月度笔记将重复日程和无法解析的条目分开统计。保存时会检查最新内容，保留其他设备的并发修改及手写段落。
+
+### English
+
+- Month view reserves three event rows per week. Titles stay on one line, and extra events expand in place. Muted dates, month labels and curved boundaries distinguish adjacent months.
+- The event editor aligns start and end times, uses calendar colors for categories, and places reminder guidance below the field. Save sits at the bottom right. The title field no longer shows a blue focus frame.
+- Switching all-day mode on and off restores the original start and end times.
+- Monthly notes report duplicates separately from unreadable entries. Saves check the latest note contents to preserve concurrent edits and handwritten sections.
+
 ## 0.10.18 — 2026-10-22
 
 - 新增日记自动待办的“跳过”和“恢复”按钮，按日程实例保留跳过记录；不修改日历或完成状态。

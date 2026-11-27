@@ -4,7 +4,7 @@
  * 写入一律产出 v2 干净格式。
  */
 import type { CalendarEvent } from "../model/event";
-import { MONTH_FILE_RE, parseMonthlyNote, blockToEvent, serializeBlock, serializeRawBlock, serializeMonthlyNote } from "./note-format";
+import { MONTH_FILE_RE, parseMonthlyNote, blockToEvent, serializeBlock, type NoteBlock } from "./note-format";
 import type { KeyValueFileIO } from "./io";
 
 export function monthOf(startsAt: string): string {
@@ -20,16 +20,61 @@ export interface LegacyMeta {
 
 export interface LoadedMonthData {
   events: CalendarEvent[];
+  /** Original text for detecting concurrent edits to the same event. */
+  originals: Map<string, string>;
+  unreadable: { file: string; heading: string }[];
+  duplicateMonths: Record<string, number>;
   /** uid → v1 遗留元数据(仅当笔记字段里存在时)。 */
   legacy: Record<string, LegacyMeta>;
-  /** 无法还原的块数(缺 id/starts),提示用户而非静默吞掉。 */
+  /** 无法还原的块数；不包含已成功解析的同 ID 副本。 */
   skipped: number;
+  /** 已解析，但同 ID 已读取过的块数。 */
+  duplicates: number;
+}
+
+/** Keep raw sections so that unrelated Markdown survives byte-for-byte. */
+function sections(text: string) {
+  const headings = [...text.matchAll(/^##[^\S\r\n]+[^\r\n]+(?=\r?$)/gm)];
+  return {
+    prefix: text.slice(0, headings[0]?.index ?? text.length),
+    blocks: headings.map((h, i) => {
+      const raw = text.slice(h.index, headings[i + 1]?.index ?? text.length);
+      const block = parseMonthlyNote(raw).blocks[0];
+      return { raw, block, id: block.fields.id ?? block.fields.uid };
+    }),
+  };
+}
+
+function eventLike(b: NoteBlock): boolean {
+  return ["id", "uid", "starts", "start", "ends", "end", "overrides", "recurrence_id"].some(key => key in b.fields);
+}
+
+/** Only competing edits to targeted blocks block the write. */
+function checkTargets(current: string, original: string | undefined, ids: ReadonlySet<string>, path: string): void {
+  if (original === undefined || current === original) return;
+  const grouped = (text: string) => {
+    const byId = new Map<string, string[]>();
+    for (const { id, raw } of sections(text).blocks) {
+      if (!ids.has(id)) continue;
+      const group = byId.get(id) ?? [];
+      group.push(raw.trimEnd());
+      byId.set(id, group);
+    }
+    return byId;
+  };
+  const before = grouped(original), now = grouped(current);
+  for (const id of ids) {
+    if (JSON.stringify(before.get(id)) !== JSON.stringify(now.get(id))) {
+      throw new Error(`${path} 中的目标日程刚被修改，已保留当前文件。请刷新日程后重试。`);
+    }
+  }
 }
 
 export class MonthlyNoteStore {
   constructor(
     private readonly io: KeyValueFileIO,
     private readonly folder: string,
+    private readonly onWrite?: (path: string) => void,
   ) {}
 
   private monthPath(month: string): string {
@@ -45,21 +90,27 @@ export class MonthlyNoteStore {
   async loadAll(): Promise<LoadedMonthData> {
     const events: CalendarEvent[] = [];
     const legacy: Record<string, LegacyMeta> = {};
-    let skipped = 0;
+    const originals = new Map<string, string>();
+    const unreadable: LoadedMonthData["unreadable"] = [];
+    const duplicateMonths: Record<string, number> = {};
+    let duplicates = 0;
     const seen = new Set<string>();
     for (const path of await this.listMonthPaths()) {
       const text = await this.io.readText(path);
-      if (!text) continue;
+      if (text === null) continue;
+      originals.set(path, text);
+      const file = path.slice(path.lastIndexOf("/") + 1);
       const { blocks } = parseMonthlyNote(text);
       for (const b of blocks) {
         const ev = blockToEvent(b);
         if (!ev) {
-          skipped++;
+          if (eventLike(b)) unreadable.push({ file, heading: b.heading });
           continue;
         }
         // 跨月残留的同 id 块只认最早一份(全量写回时另一份会被清掉)
         if (seen.has(ev.id)) {
-          skipped++;
+          duplicates++;
+          duplicateMonths[file] = (duplicateMonths[file] ?? 0) + 1;
           continue;
         }
         seen.add(ev.id);
@@ -69,42 +120,79 @@ export class MonthlyNoteStore {
         if (href || etag) legacy[ev.id] = { href, etag };
       }
     }
-    return { events, legacy, skipped };
+    return { events, legacy, skipped: unreadable.length, duplicates, duplicateMonths, unreadable, originals };
   }
 
-  /**
-   * 重写指定月份(传入【库内全量】事件集):
-   * 月度文件最终内容 = 未知/手写块(原样保留)+ startsAt 属于本月的日程块。
-   * 日程跨月移动时,旧月文件里的旧块会被自动移除——这是全量语义的关键:
-   * 按 id 替换 + 归属判定,任何路径(拖拽/编辑/同步/迁移)都不会留下跨月残留副本。
-   */
-  async writeMonth(month: string, allEvents: CalendarEvent[], preamble = ""): Promise<void> {
+  private async update(path: string, edit: (text: string | null) => string | null): Promise<void> {
+    let changed = false;
+    const transform = (text: string | null) => {
+      const next = edit(text);
+      changed = next !== null && text !== next;
+      return next;
+    };
+    if (this.io.updateText) await this.io.updateText(path, transform);
+    else {
+      const next = transform(await this.io.readText(path));
+      if (changed && next !== null) await this.io.writeText(path, next);
+    }
+    if (changed) this.onWrite?.(path);
+  }
+
+  /** Apply only the supplied events; untouched sections keep their exact Markdown. */
+  async writeMonth(month: string, events: CalendarEvent[], preamble = "", originals?: Map<string, string>): Promise<void> {
     await this.io.ensureDir(this.folder);
     const path = this.monthPath(month);
-    const existingText = await this.io.readText(path);
-    const parsed = existingText ? parseMonthlyNote(existingText) : { preamble: "", blocks: [] };
-    const usePreamble = existingText ? parsed.preamble : preamble;
-    const byId = new Map(allEvents.map((e) => [e.id, e]));
-    const out: string[] = [];
-    const emitted = new Set<string>();
-    for (const b of parsed.blocks) {
-      const id = b.fields["id"] ?? b.fields["uid"];
-      const ev = id ? byId.get(id) : undefined;
-      if (ev && monthOf(ev.startsAt) === month) {
-        if (emitted.has(ev.id)) continue; // 同 id 重复块(历史残留):只保留第一份
-        out.push(serializeBlock(ev, b));
-        emitted.add(ev.id);
-      } else if (id && ev && monthOf(ev.startsAt) !== month) {
-        continue; // 日程已移往其他月份:本月的旧块删除
-      } else {
-        out.push(serializeRawBlock(b)); // 手写段落等非日程块原样保留
+    const byId = new Map(events.map(e => [e.id, e]));
+    const ids = new Set(byId.keys());
+    await this.update(path, current => {
+      const text = current ?? "";
+      checkTargets(text, originals && (originals.get(path) ?? ""), ids, path);
+      const parsed = sections(text);
+      const nl = text.includes("\r\n") ? "\r\n" : "\n";
+      let out = current === null ? preamble : parsed.prefix;
+      const emitted = new Set<string>();
+      for (const { raw, block, id } of parsed.blocks) {
+        const ev = byId.get(id);
+        if (!ev) {
+          out += raw;
+          continue;
+        }
+        if (monthOf(ev.startsAt) !== month || emitted.has(id)) continue;
+        emitted.add(id);
+        const ending = raw.match(/(?:\r?\n)*$/)?.[0] ?? "";
+        out += serializeBlock(ev, block).replace(/\n/g, nl) + ending;
+      }
+      const fresh = events.filter(e => monthOf(e.startsAt) === month && !emitted.has(e.id))
+        .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+      for (const ev of fresh) {
+        if (out && !out.endsWith(nl)) out += nl;
+        if (out && !out.endsWith(nl + nl)) out += nl;
+        out += serializeBlock(ev).replace(/\n/g, nl) + nl;
+      }
+      return current === null && !out ? null : out;
+    });
+  }
+
+  /** Write destinations before cleaning old months, including on a cross-month move. */
+  async saveChanges(events: CalendarEvent[], loaded: LoadedMonthData): Promise<string[]> {
+    const destinations = new Map<string, CalendarEvent[]>();
+    const movedFrom = new Map<string, CalendarEvent[]>();
+    const oldById = new Map(loaded.events.map(e => [e.id, e]));
+    for (const ev of new Map(events.map(e => [e.id, e])).values()) {
+      const month = monthOf(ev.startsAt);
+      if (!destinations.has(month)) destinations.set(month, []);
+      destinations.get(month)!.push(ev);
+      const old = oldById.get(ev.id);
+      if (old && monthOf(old.startsAt) !== month) {
+        const from = monthOf(old.startsAt);
+        if (!movedFrom.has(from)) movedFrom.set(from, []);
+        movedFrom.get(from)!.push(ev);
       }
     }
-    const fresh = allEvents
-      .filter((e) => monthOf(e.startsAt) === month && !emitted.has(e.id))
-      .sort((a, b) => (a.startsAt < b.startsAt ? -1 : a.startsAt > b.startsAt ? 1 : 0))
-      .map((e) => serializeBlock(e));
-    await this.io.writeText(path, serializeMonthlyNote(usePreamble, [...out, ...fresh]));
+    for (const group of [destinations, movedFrom]) {
+      for (const [month, changes] of group) await this.writeMonth(month, changes, "", loaded.originals);
+    }
+    return [...new Set([...destinations.keys(), ...movedFrom.keys()])];
   }
 
   async readMonthPreamble(month: string): Promise<string> {
@@ -112,25 +200,23 @@ export class MonthlyNoteStore {
     return text ? parseMonthlyNote(text).preamble : "";
   }
 
-  /** 删除指定 uid 所在的整个块(跨月查找)。 */
-  async removeByUids(ids: ReadonlySet<string>): Promise<number> {
+  async removeByUids(ids: ReadonlySet<string>, originals?: Map<string, string>): Promise<number> {
     let removed = 0;
     for (const path of await this.listMonthPaths()) {
-      const text = await this.io.readText(path);
-      if (!text) continue;
-      const { preamble, blocks } = parseMonthlyNote(text);
-      const kept = blocks.filter((b) => {
-        const ev = blockToEvent(b);
-        if (ev && ids.has(ev.id)) {
-          removed++;
-          return false;
+      let count = 0;
+      await this.update(path, text => {
+        count = 0;
+        if (!text) return text;
+        checkTargets(text, originals && (originals.get(path) ?? ""), ids, path);
+        const parsed = sections(text);
+        let out = parsed.prefix;
+        for (const { raw, block, id } of parsed.blocks) {
+          if (ids.has(id) && blockToEvent(block)) count++;
+          else out += raw;
         }
-        return true;
+        return out;
       });
-      if (kept.length !== blocks.length) {
-        // 删除操作只移除目标块,兄弟块一律原样保留(serializeBlock 的有损重写会损坏手写内容)
-        await this.io.writeText(path, serializeMonthlyNote(preamble, kept.map((b) => serializeRawBlock(b))));
-      }
+      removed += count;
     }
     return removed;
   }

@@ -651,6 +651,51 @@ const makeEngine = (server: ReturnType<typeof makeServer>, journal: SyncJournal,
   eq("删除例外写入单次取消状态", saved.recurrenceOverrides?.[0].status, "cancelled");
 }
 
+// Exercise the installed plugin's save paths through Vault.process, including a concurrent writer.
+{
+  const path = "Agenda/2026-09.md";
+  const original = "## First\r\n- id:: A\r\n- starts:: 2026-09-01\r\n\r\n";
+  const other = "## Second\r\n- id:: B\r\n- starts:: 2026-09-02\r\n";
+  const handwritten = "\r\n## 手写小结\r\n\r\n- [ ] ordinary  \r\n";
+  const h = await makePlugin({ data: { provider: "none", folder: "Agenda" }, seed: { [path]: original + other } });
+  const plugin = h.plugin as any;
+  const store = plugin.notes;
+  const read = await store.loadAll();
+  const latestOther = other.replace("Second", "Updated by phone") + handwritten;
+  const vault = plugin.app.vault;
+  const processFile = vault.process;
+  vault.process = async (f: { path: string }, edit: (text: string) => string) => {
+    h.files.set(path, original + latestOther);
+    vault.process = processFile;
+    return processFile(f, edit);
+  };
+  await store.saveChanges([{ ...read.events[0], title: "Edited by plugin" }], read);
+  ok("并发改动的日程和手写内容逐字节保留", h.files.get(path)!.endsWith(latestOther));
+  eq("普通二级标题不计为解析失败", (await store.loadAll()).skipped, 0);
+  const beforeConflict = await store.loadAll();
+  const changed = h.files.get(path)!.replace("Edited by plugin", "New phone edit");
+  h.files.set(path, changed);
+  let rejected = false;
+  try { await store.saveChanges([{ ...beforeConflict.events[0], title: "Stale save" }], beforeConflict); }
+  catch { rejected = true; }
+  ok("同条日程并发修改时拒绝覆盖", rejected && h.files.get(path) === changed);
+  const malformed = "## missing date\n- id:: no-date\n";
+  h.files.set(path, changed + malformed);
+  eq("坏日程定位文件与标题", (await store.loadAll()).unreadable, [{ file: "2026-09.md", heading: "missing date" }]);
+  await store.removeByUids(new Set(["A"]));
+  eq("删除只移除目标原文范围", h.files.get(path), latestOther + malformed);
+  const dup = other + other;
+  h.files.set(path, dup);
+  await plugin.observeMonth(vault.getAbstractFileByPath(path), "observed");
+  const last = plugin.monthActivity[0];
+  ok("重复副本写回按月份与时间记录", last.kind === "observed" && last.file === "2026-09.md" && last.duplicates === 1 && !!last.at);
+  ok("诊断历史没有日程内容", !JSON.stringify(last).includes("Second"));
+  ok("MyAgenda 自己写入有单独记录", plugin.monthActivity.some((row: any) => row.kind === "saved"));
+  const late = "Agenda/2026-10.md";
+  vault.create = async () => { h.files.set(late, handwritten); throw Error("already exists"); };
+  await store.writeMonth("2026-10", [{ id: "C", startsAt: "2026-10-03", title: "Created", isAllDay: true }]);
+  ok("创建文件时竞争写入合并最新内容", h.files.get(late)!.startsWith(handwritten) && h.files.get(late)!.includes("- id:: C"));
+}
 console.log(`九轮自检:${pass} 通过,${fails.length} 失败`);
 for (const f of fails) console.log("  ✗", f);
 if (fails.length) process.exit(1);

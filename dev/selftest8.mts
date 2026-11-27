@@ -273,6 +273,23 @@ const freshJournal = (): SyncJournal => JSON.parse(JSON.stringify(EMPTY_JOURNAL)
   eq("lang:非法值 sanitize 回 auto", sanitize({ lang: "jp" }).lang, "auto");
 }
 
+// 旧格式副本可以解析，不能计为读失败；读取本身不得改写笔记。
+{
+  const io = memIO();
+  const notes = new MonthlyNoteStore(io, "Agenda");
+  const path = "Agenda/2026-09.md";
+  const source = [
+    "## 当前日程", "- id:: same-uid", "- starts:: 2026-09-28",
+    "", "## 旧格式副本", "- uid:: same-uid", "- start:: 2026-09-28",
+    "", "## 缺少日期的条目", "- id:: missing-date", "",
+  ].join("\n");
+  await io.writeText(path, source);
+  const loaded = await notes.loadAll();
+  eq("同 ID 副本保留先读取的日程", loaded.events.map((e) => e.title), ["当前日程"]);
+  eq("同 ID 副本单独计数", loaded.duplicates, 1);
+  eq("只报告实际无法读取的块", loaded.skipped, 1);
+  eq("读取保留月度笔记原文", await io.readText(path), source);
+}
 console.log(`八轮自检:${pass} 通过,${fails.length} 失败`);
 for (const f of fails) console.log("  ✗", f);
 if (fails.length) process.exit(1);

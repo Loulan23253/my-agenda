@@ -1,10 +1,11 @@
-import { Plugin, Notice, WorkspaceLeaf, TFile, TAbstractFile, MarkdownRenderChild, MarkdownView, editorInfoField } from "obsidian";
+import { Plugin, Modal, Notice, WorkspaceLeaf, TFile, TAbstractFile, MarkdownRenderChild, MarkdownView, editorInfoField } from "obsidian";
 import * as obsidianModule from "obsidian";
 import { setLang, t } from "./l10n/strings";
 import { sanitize, type Settings } from "./kernel/settings";
 import { SettingsTab } from "./kernel/settings-tab";
 import { VaultFileIO } from "./platform/io";
-import { MonthlyNoteStore, monthOf } from "./data/note-store";
+import { parseMonthlyNote, blockToEvent, serializeBlock } from "./data/note-format";
+import { MonthlyNoteStore } from "./data/note-store";
 import { EMPTY_JOURNAL, journalRemove, type SyncJournal } from "./data/journal";
 import type { KeyValueFileIO } from "./data/io";
 import { obsidianHttp, discoverCalendars } from "./sync/dav";
@@ -30,6 +31,14 @@ import { shiftIsoDays } from "./kernel/dates";
 import type { CalendarEvent } from "./model/event";
 
 
+type MonthActivity = {
+  at: string;
+  file: string;
+  kind: "observed" | "saved" | "created" | "removed";
+  syncing: boolean;
+  duplicates?: number;
+};
+
 export default class MyAgendaPluginV2 extends Plugin {
   settings!: Settings;
   private io!: KeyValueFileIO;
@@ -37,6 +46,8 @@ export default class MyAgendaPluginV2 extends Plugin {
   private storageFolder = "";
   private journal: SyncJournal = EMPTY_JOURNAL;
   private cache: { events: CalendarEvent[] } | null = null;
+  private unreadableSignature = "";
+  private monthActivity: MonthActivity[] = [];
   private syncInFlight = false;
   private syncState: SyncStatus = "idle";
   private firedReminders = new Set<string>();
@@ -44,9 +55,11 @@ export default class MyAgendaPluginV2 extends Plugin {
 
   async onload(): Promise<void> {
     this.settings = sanitize(await this.loadData());
+    const recent = this.app.loadLocalStorage?.("myagenda-month-activity");
+    if (Array.isArray(recent)) this.monthActivity = recent.slice(0, 120);
     this.io = new VaultFileIO(this.app.vault, this.app.fileManager);
     this.storageFolder = this.settings.folder;
-    this.notes = new MonthlyNoteStore(this.io, this.storageFolder);
+    this.notes = new MonthlyNoteStore(this.io, this.storageFolder, path => this.recordMonthActivity(path, "saved"));
     await this.loadJournal();
     setLang(this.resolveLang());
     setCategoryColors(this.settings.categoryColors);
@@ -138,12 +151,18 @@ export default class MyAgendaPluginV2 extends Plugin {
         }).open(),
     });
 
-    this.registerEvent(this.app.vault.on("create", (f) => void this.onFileCreate(f)));
+    this.registerEvent(this.app.vault.on("create", (f) => {
+      if (this.app.workspace.layoutReady) void this.observeMonth(f, "created");
+      void this.onFileCreate(f);
+    }));
     this.registerEvent(
-      this.app.vault.on("modify", (f) => this.touchCache(f.path)),
+      this.app.vault.on("modify", (f) => { void this.observeMonth(f, "observed"); this.touchCache(f.path); }),
     );
-    this.registerEvent(this.app.vault.on("delete", (f) => this.touchCache(f.path)));
-    this.registerEvent(this.app.vault.on("rename", (f, old) => { this.touchCache(f.path); this.touchCache(old); }));
+    this.registerEvent(this.app.vault.on("delete", (f) => { this.recordMonthActivity(f.path, "removed"); this.touchCache(f.path); }));
+    this.registerEvent(this.app.vault.on("rename", (f, old) => {
+      this.recordMonthActivity(old, "removed"); this.recordMonthActivity(f.path, "created");
+      this.touchCache(f.path); this.touchCache(old);
+    }));
 
     this.register(() => this.stopAutoSync());
     this.restartAutoSync();
@@ -210,6 +229,59 @@ export default class MyAgendaPluginV2 extends Plugin {
     }, 1000);
   }
 
+  private isMonthlyPath(path: string): boolean {
+    const file = path.slice(path.lastIndexOf("/") + 1);
+    return path === `${this.storageFolder}/${file}` && /^\d{4}-\d{2}\.md$/.test(file);
+  }
+
+  private async observeMonth(file: TAbstractFile, kind: "observed" | "created"): Promise<void> {
+    const path = file.path;
+    if (!(file instanceof TFile) || !this.isMonthlyPath(path)) return;
+    const at = new Date().toISOString(), syncing = this.syncInFlight;
+    let duplicates: number | undefined;
+    try {
+      const { blocks } = parseMonthlyNote(await this.app.vault.read(file));
+      const seen = new Set<string>();
+      duplicates = 0;
+      for (const block of blocks) {
+        const ev = blockToEvent(block);
+        if (!ev) continue;
+        if (seen.has(ev.id)) duplicates++;
+        seen.add(ev.id);
+      }
+    } catch { /* The file may already have been moved by another device. */ }
+    this.recordMonthActivity(path, kind, at, syncing, duplicates);
+  }
+
+  private recordMonthActivity(path: string, kind: MonthActivity["kind"], at = new Date().toISOString(), syncing = this.syncInFlight, duplicates?: number): void {
+    if (!this.isMonthlyPath(path)) return;
+    const file = path.slice(path.lastIndexOf("/") + 1);
+    this.monthActivity.unshift({ at, file, kind, syncing, duplicates });
+    this.monthActivity.length = Math.min(this.monthActivity.length, 120);
+    try { this.app.saveLocalStorage?.("myagenda-month-activity", this.monthActivity); }
+    catch { /* Diagnostics remain available in memory when local storage is full. */ }
+  }
+
+  async openMonthActivity(): Promise<void> {
+    const read = await this.notes.loadAll();
+    const modal = new Modal(this.app);
+    modal.titleEl.setText(t("months.title"));
+    modal.contentEl.createEl("p", { text: t("months.summary", { events: read.events.length, dup: read.duplicates, bad: read.skipped }) });
+    for (const [file, n] of Object.entries(read.duplicateMonths)) {
+      modal.contentEl.createDiv({ text: t("months.duplicates", { file, n }) });
+    }
+    for (const item of read.unreadable) modal.contentEl.createDiv({ text: `${item.file} · ${item.heading}` });
+    modal.contentEl.createEl("h3", { text: t("months.history") });
+    if (!this.monthActivity.length) modal.contentEl.createDiv({ text: t("months.empty") });
+    for (const row of [...this.monthActivity].sort((a, b) => b.at.localeCompare(a.at))) {
+      const activity = t(`months.${row.kind}`);
+      const syncing = row.syncing ? t("months.syncing") : "";
+      const count = row.duplicates === undefined ? "" : t("months.count", { n: row.duplicates });
+      modal.contentEl.createDiv({ text: `${new Date(row.at).toLocaleString()} · ${row.file} · ${activity}${syncing}${count}` });
+    }
+    modal.open();
+  }
+
   private touchCache(path: string): void {
     if (path === this.settings.folder || path.startsWith(this.settings.folder + "/")) {
       this.cache = null;
@@ -251,7 +323,12 @@ export default class MyAgendaPluginV2 extends Plugin {
     if (this.cache) return Promise.resolve(this.cache.events);
     return this.notes.loadAll().then((r) => {
       this.cache = { events: r.events };
-      if (r.skipped > 0) new Notice(`${r.skipped} 个日程块无法解析,已跳过`);
+      const signature = JSON.stringify(r.unreadable);
+      if (r.skipped && signature !== this.unreadableSignature) {
+        const item = r.unreadable[0];
+        new Notice(t("notice.unreadableEventBlocks", { n: r.skipped, file: item.file, heading: item.heading }), 10000);
+      }
+      this.unreadableSignature = signature;
       return r.events;
     });
   }
@@ -387,26 +464,22 @@ export default class MyAgendaPluginV2 extends Plugin {
   /** 全量重写月度文件(ICS 导入等无账本路径使用)。 */
   private async writeAll(events: Awaited<ReturnType<MonthlyNoteStore["loadAll"]>>["events"], removeMissing = true): Promise<void> {
     // ICS 订阅 = 数据源:该月内容以订阅为准,但保留与订阅无关的既有本地日程
-    const existing = (await this.notes.loadAll()).events;
-    const importedIds = new Set(events.map((e) => e.id));
-    const removed = new Set(existing.filter((e) => removeMissing && e.id.startsWith("ics-") && !importedIds.has(e.id)).map((e) => e.id));
-    if (removed.size) await this.notes.removeByUids(removed);
-    const merged = [...existing.filter((e) => !importedIds.has(e.id) && !removed.has(e.id)), ...events];
-    // 月份并集:旧位置与新位置都要重写,否则订阅事件跨月移动后旧块残留
-    const months = new Set([...merged.map((e) => monthOf(e.startsAt)), ...existing.map((e) => monthOf(e.startsAt))]);
-    for (const m of months) {
-      const preamble = await this.notes.readMonthPreamble(m);
-      // writeMonth 需要库内全量(其跨月清理按 id 全集判断),传子集会导致旧块残留
-      await this.notes.writeMonth(m, merged, preamble);
-    }
+    const read = await this.notes.loadAll();
+    const importedIds = new Set(events.map(e => e.id));
+    const removed = new Set(read.events.filter(e => removeMissing && e.id.startsWith("ics-") && !importedIds.has(e.id)).map(e => e.id));
+    if (removed.size) await this.notes.removeByUids(removed, read.originals);
+    const byId = new Map(read.events.map(e => [e.id, e]));
+    const changed = events.filter(ev => {
+      const old = byId.get(ev.id);
+      return !old || serializeBlock(old) !== serializeBlock(ev);
+    });
+    await this.notes.saveChanges(changed, read);
   }
 
   /** 保存一批日程(新建/编辑/重复实例拆分),写月度文件 + 账本置脏 + 触发同步。 */
   private async saveEventsList(events: CalendarEvent[]): Promise<void> {
-    const all = (await this.notes.loadAll()).events;
-    const oldById = new Map(all.map((e) => [e.id, e]));
-    const merged = [...all];
-    const updatedById = new Map(oldById);
+    const read = await this.notes.loadAll();
+    const updatedById = new Map(read.events.map(e => [e.id, e]));
     events = events.map((ev) => {
       const master = updatedById.get(ev.id);
       const updated = ev.recurrenceId && master
@@ -416,23 +489,15 @@ export default class MyAgendaPluginV2 extends Plugin {
       updatedById.set(ev.id, updated);
       return updated;
     });
+    try {
+      await this.notes.saveChanges(events, read);
+    } catch (error) {
+      new Notice(String(error), 10000);
+      throw error;
+    }
     for (const ev of events) {
-      const idx = merged.findIndex((x) => x.id === ev.id);
-      if (idx >= 0) merged[idx] = ev;
-      else merged.push(ev);
       const entry = this.journal.events[ev.id];
       if (entry) entry.pushedFingerprint = "dirty";
-    }
-    // 受影响月份:新位置 + 被移走事件的旧位置(跨月移动不留残留)
-    const affected = new Set<string>();
-    for (const ev of events) {
-      affected.add(monthOf(ev.startsAt));
-      const old = oldById.get(ev.id);
-      if (old) affected.add(monthOf(old.startsAt));
-    }
-    for (const month of affected) {
-      const preamble = await this.notes.readMonthPreamble(month);
-      await this.notes.writeMonth(month, merged, preamble);
     }
     this.invalidate();
     this.refreshPanels();
@@ -646,20 +711,10 @@ export default class MyAgendaPluginV2 extends Plugin {
   }
 
   async migrateToClean(): Promise<void> {
-    const months = new Set((await this.notes.listMonthPaths()).map((p) => p.slice(-10, -3)));
+    const read = await this.notes.loadAll();
     let n = 0;
-    const all = (await this.notes.loadAll()).events;
-    const byMonth = new Map<string, typeof all>();
-    for (const ev of all) {
-      const m = monthOf(ev.startsAt);
-      const list = byMonth.get(m) ?? [];
-      list.push(ev);
-      byMonth.set(m, list);
-    }
-    for (const month of months) {
-      const preamble = await this.notes.readMonthPreamble(month);
-      // 传库内全量(writeMonth 跨月清理按 id 全集判断)
-      await this.notes.writeMonth(month, all, preamble);
+    for (const path of read.originals.keys()) {
+      await this.notes.writeMonth(path.slice(-10, -3), read.events, "", read.originals);
       n++;
     }
     this.invalidate();
@@ -727,11 +782,14 @@ export default class MyAgendaPluginV2 extends Plugin {
           return next;
         });
       } else if (f.path.startsWith(this.settings.folder + "/") && /\d{4}-\d{2}\.md$/.test(f.name)) {
+        let changed = false;
         await this.app.vault.process(f, (text) => {
           const [next, c] = stripLegacyFromMonthly(text);
           n += c;
+          changed = next !== text;
           return next;
         });
+        if (changed) this.recordMonthActivity(f.path, "saved");
       }
     }
     this.invalidate();
@@ -790,6 +848,7 @@ export default class MyAgendaPluginV2 extends Plugin {
   }
 
   private async onFileCreate(file: TAbstractFile): Promise<void> {
+    this.touchCache(file.path);
     if (!this.settings.injectEnabled) return;
     if (!(file instanceof TFile) || file.extension !== "md" || !/^\d{4}-\d{2}-\d{2}\.md$/.test(file.name)) return;
     if (!this.inInjectScope(file.path)) return;
@@ -903,7 +962,7 @@ export default class MyAgendaPluginV2 extends Plugin {
         this.syncInFlight = true;
         try {
           this.storageFolder = this.settings.folder;
-          this.notes = new MonthlyNoteStore(this.io, this.storageFolder);
+          this.notes = new MonthlyNoteStore(this.io, this.storageFolder, path => this.recordMonthActivity(path, "saved"));
           await this.loadJournal();
           this.invalidate();
           this.refreshPanels();

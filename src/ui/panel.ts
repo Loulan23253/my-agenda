@@ -6,6 +6,7 @@ import { filterBySearch } from "./search";
 import { renderDateStrip } from "./date-strip";
 import { renderAgendaStream, renderDayView, renderWeekView, renderMonthView, renderStatsView } from "./views";
 import { isAtToday, formatTitle, addDays, startOfDay, dateKey, parseLocal, startOfWeek } from "../kernel/dates";
+import { categoryColor } from "./palette";
 import { renderMiniCal } from "./mini-cal";
 import type { WeekStartDay } from "../kernel/dates";
 import { expandOccurrences, type Occurrence } from "../core/occurrences";
@@ -220,17 +221,19 @@ export class AgendaPanelView extends ItemView {
         const chip = (label: string, off: boolean, onClick: () => void) => {
           const el = bar.createDiv({ cls: "ag2-chip" + (off ? " off" : ""), text: label });
           el.addEventListener("click", onClick);
+          return el;
         };
         chip(t("panel.filterAll"), this.hiddenCats.size === 0, () => {
           this.hiddenCats.clear();
           void this.render();
         });
         for (const c of cats) {
-          chip(c, this.hiddenCats.has(c), () => {
+          const filter = chip(c, this.hiddenCats.has(c), () => {
             if (this.hiddenCats.has(c)) this.hiddenCats.delete(c);
             else this.hiddenCats.add(c);
             void this.render();
           });
+          if (this.tab === "month") filter.style.setProperty("--ag-category", categoryColor(c));
         }
         results.insertBefore(bar, body);
       }
@@ -308,12 +311,15 @@ export class AgendaPanelView extends ItemView {
     });
 
     const lang = getLang();
-    titlebar.createDiv({
-      cls: "ag2-largetitle",
-      text: isAtToday(this.tab, this.anchor, this.today(), this.weekStartDay()) && (this.tab === "agenda" || this.tab === "day")
+    const title = titlebar.createDiv({ cls: "ag2-largetitle" });
+    if (this.tab === "month") {
+      title.createSpan({ cls: "ag2-month-name", text: lang === "zh" ? `${this.anchor.getMonth() + 1}月` : this.anchor.toLocaleDateString(lang, { month: "long" }) });
+      title.createSpan({ cls: "ag2-month-year", text: String(this.anchor.getFullYear()) });
+    } else {
+      title.setText(isAtToday(this.tab, this.anchor, this.today(), this.weekStartDay()) && (this.tab === "agenda" || this.tab === "day")
         ? t("panel.today")
-        : formatTitle(this.tab, this.anchor, lang),
-    });
+        : formatTitle(this.tab, this.anchor, lang));
+    }
 
     const nextBtn = titlebar.createDiv({ cls: "ag2-tb-arrow", text: "›" });
     nextBtn.addEventListener("click", () => {
